@@ -1,0 +1,77 @@
+
+Dockerfile
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtualenv
+venv/
+ENV/
+env/
+.venv/
+.Python
+
+# Django
+*.log
+*.pot
+*.pyc
+local_settings.py
+db.sqlite3
+media/
+staticfiles/
+
+# DRF
+*.json
+*.sqlite3
+
+# Environment variables
+.env
+*.env
+.env.local
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Mac
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Migrations 
+**/migrations/*.py
+**/migrations/*.pyc
+!*/migrations/__init__.py
+
+# Coverage and testing
+htmlcov/
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+.coverage.*
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+.pyre/
+
+# Build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Docker 
+*.pid
+*.tar
+*.bak
