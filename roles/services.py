@@ -188,11 +188,11 @@ class RoleService:
                 logger.info(f"Created new group '{group_name}' with permissions from '{role.required_group.name}'")
 
             user.groups.add(group)
-            logger.debug(f"Added user {user.username} to group '{group_name}'")
+            logger.debug(f"Added user {user.email} to group '{group_name}'")
         else:
             # Regular role - add to role's required group
             user.groups.add(role.required_group)
-            logger.debug(f"Added user {user.username} to group '{role.required_group.name}'")
+            logger.debug(f"Added user {user.email} to group '{role.required_group.name}'")
 
     @staticmethod
     def _remove_user_from_role_group(user, role, location=None):
@@ -210,13 +210,13 @@ class RoleService:
                 try:
                     group = Group.objects.get(name=group_name)
                     user.groups.remove(group)
-                    logger.debug(f"Removed user {user.username} from group '{group_name}'")
+                    logger.debug(f"Removed user {user.email} from group '{group_name}'")
                 except Group.DoesNotExist:
                     logger.warning(f"Group '{group_name}' does not exist for removal")
         else:
             # Regular role - remove from role's required group
             user.groups.remove(role.required_group)
-            logger.debug(f"Removed user {user.username} from group '{role.required_group.name}'")
+            logger.debug(f"Removed user {user.email} from group '{role.required_group.name}'")
 
     @staticmethod
     @transaction.atomic
@@ -258,7 +258,7 @@ class RoleService:
 
         if not assignment:
             logger.warning(
-                f"No active assignment found for user {user.username}, "
+                f"No active assignment found for user {user.email}, "
                 f"role {role.name}, location {normalized_location}"
             )
             return False
@@ -442,7 +442,7 @@ class RoleService:
         # Bulk update to deactivate all assignments at once
         updated_count = assignments.update(
             is_active=False,
-            reason=f"Deactivated by {deactivated_by.username if deactivated_by else 'system'}"
+            reason=f"Deactivated by {deactivated_by.email if deactivated_by else 'system'}"
         )
 
         # Get unique groups to remove (using set to avoid duplicates)
@@ -466,7 +466,7 @@ class RoleService:
         # Clear user permissions cache
         RoleService.invalidate_user_cache(user.id)
 
-        logger.info(f"Deactivated {updated_count} roles for user {user.username}")
+        logger.info(f"Deactivated {updated_count} roles for user {user.email}")
         return updated_count
 
     @staticmethod
@@ -622,7 +622,7 @@ class RoleService:
         groups_to_add = expected_groups - current_groups
         for group in groups_to_add:
             user.groups.add(group)
-            logger.info(f"Added user {user.username} to group '{group.name}' during sync")
+            logger.info(f"Added user {user.email} to group '{group.name}' during sync")
 
         from product.models import Location as ProductLocation
 
@@ -645,7 +645,7 @@ class RoleService:
             if group.name in role_related_group_names:
                 user.groups.remove(group)
                 removed_groups.append(group.name)
-                logger.info(f"Removed user {user.username} from group '{group.name}' during sync")
+                logger.info(f"Removed user {user.email} from group '{group.name}' during sync")
 
         # Clear cache
         RoleService.invalidate_user_cache(user.id)

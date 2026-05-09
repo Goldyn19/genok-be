@@ -158,9 +158,9 @@ class RoleDetailSerializer(RoleSerializer):
                 'id': a.id,
                 'user': {
                     'id': a.user.id,
-                    'username': a.user.username,
+                    'username': a.user.email,
                     'email': a.user.email,
-                    'full_name': f"{a.user.first_name} {a.user.last_name}".strip() or a.user.username
+                    'full_name': f"{a.user.first_name} {a.user.last_name}".strip() or a.user.email
                 },
                 'location': {
                     'id': a.location.id,
@@ -168,7 +168,7 @@ class RoleDetailSerializer(RoleSerializer):
                 } if a.location else None,
                 'assigned_by': {
                     'id': a.assigned_by.id,
-                    'username': a.assigned_by.username
+                    'username': a.assigned_by.email
                 } if a.assigned_by else None,
                 'assigned_at': a.assigned_at,
                 'reason': a.reason
@@ -180,18 +180,18 @@ class RoleDetailSerializer(RoleSerializer):
 class UserRoleAssignmentSerializer(serializers.ModelSerializer):
     """Serializer for user role assignments"""
 
-    user_name = serializers.ReadOnlyField(source='user.username')
+    # user_name = serializers.ReadOnlyField(source='user.username')
     user_email = serializers.ReadOnlyField(source='user.email')
     role_name = serializers.ReadOnlyField(source='role.name')
     role_details = RoleSerializer(source='role', read_only=True)
-    assigned_by_name = serializers.ReadOnlyField(source='assigned_by.username')
+    assigned_by_name = serializers.ReadOnlyField(source='assigned_by.email')
     location_name = serializers.ReadOnlyField(source='location.location')
     normalized_location_name = serializers.SerializerMethodField()
 
     class Meta:
         model = UserRoleAssignment
         fields = [
-            'id', 'user', 'user_name', 'user_email',
+            'id', 'user',  'user_email',
             'role', 'role_name', 'role_details',
             'location', 'location_name', 'normalized_location_name',
             'assigned_by', 'assigned_by_name',
@@ -367,13 +367,13 @@ class UserRoleAssignmentCreateSerializer(serializers.Serializer):
                 )
                 successful.append({
                     'user_id': user.id,
-                    'username': user.username,
+                    'username': user.email,
                     'assignment_id': assignment.id
                 })
             except Exception as e:
                 errors.append({
                     'user_id': user.id,
-                    'username': user.username,
+                    'username': user.email,
                     'error': str(e)
                 })
 
@@ -388,6 +388,7 @@ class UserRoleAssignmentCreateSerializer(serializers.Serializer):
 class UserSerializer(serializers.ModelSerializer):
     """Base user serializer"""
 
+    username = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -395,9 +396,12 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'full_name', 'is_active']
         read_only_fields = ['id']
 
+    def get_username(self, obj):
+        return obj.email
+
     def get_full_name(self, obj):
         """Get user's full name or fallback to username"""
-        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.email
 
 
 class UserDetailSerializer(UserSerializer):
@@ -443,7 +447,7 @@ class UserDetailSerializer(UserSerializer):
                     'name': a.location.location
                 } if a.location else None,
                 'assigned_at': a.assigned_at,
-                'assigned_by': a.assigned_by.username if a.assigned_by else None,
+                'assigned_by': a.assigned_by.email if a.assigned_by else None,
                 'reason': a.reason
             }
             for a in assignments

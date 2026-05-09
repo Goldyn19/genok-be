@@ -58,9 +58,9 @@ class PurchaseApprovalService:
     def _get_permission_codename_for_step(step):
         """Get permission codename for a specific approval step"""
         step_map = {
-            1: 'can_do_first_approval',
-            2: 'can_do_second_approval',
-            3: 'can_do_final_approval',
+            1: 'can_do_first_approval_purchase',
+            2: 'can_do_second_approval_purchase',
+            3: 'can_do_final_approval_purchase',
         }
         return step_map.get(step)
 

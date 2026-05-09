@@ -426,7 +426,7 @@ class RoleViewSet(viewsets.ModelViewSet):
                 'assignment_id': assignment.id,
                 'user': {
                     'id': assignment.user.id,
-                    'username': assignment.user.username,
+                    'username': assignment.user.email,
                     'email': assignment.user.email,
                     'full_name': f"{assignment.user.first_name} {assignment.user.last_name}".strip()
                 },
@@ -435,7 +435,7 @@ class RoleViewSet(viewsets.ModelViewSet):
                     'name': assignment.location.location
                 } if assignment.location else None,
                 'assigned_at': assignment.assigned_at,
-                'assigned_by': assignment.assigned_by.username if assignment.assigned_by else None,
+                'assigned_by': assignment.assigned_by.email if assignment.assigned_by else None,
                 'reason': assignment.reason
             })
 
@@ -569,7 +569,7 @@ class UserRoleAssignmentViewSet(viewsets.ModelViewSet):
         return Response({
             'message': f'Role assignment deactivated',
             'assignment_id': assignment.id,
-            'user': assignment.user.username,
+            'user': assignment.user.email,
             'role': assignment.role.name,
             'is_active': assignment.is_active
         })
@@ -704,7 +704,6 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
-                Q(username__icontains=search) |
                 Q(email__icontains=search) |
                 Q(first_name__icontains=search) |
                 Q(last_name__icontains=search)
@@ -763,7 +762,7 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
         permissions = {f"{p.content_type.app_label}.{p.codename}" for p in permission_objects}
         serializer = PermissionSerializer(permission_objects, many=True)
         return Response({
-            'user': user.username,
+            'user': user.email,
             'permissions': sorted(list(permissions)),
             'permission_details': serializer.data
         })
@@ -780,7 +779,7 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({
             'message': 'User groups synchronized',
-            'user': user.username,
+            'user': user.email,
             'added_groups': result['added_groups'],
             'removed_groups': result['removed_groups']
         })
@@ -795,7 +794,7 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
         count = RoleService.deactivate_all_user_roles(user, deactivated_by=request.user)
 
         return Response({
-            'message': f'Deactivated {count} role assignments for user {user.username}',
+            'message': f'Deactivated {count} role assignments for user {user.email}',
             'count': count
         })
 
@@ -844,10 +843,10 @@ class RoleDashboardView(generics.GenericAPIView):
         recent_assignments_data = []
         for assignment in recent_assignments:
             recent_assignments_data.append({
-                'user': assignment.user.username,
+                'user': assignment.user.email,
                 'role': assignment.role.name,
                 'location': assignment.location.location if assignment.location else None,
-                'assigned_by': assignment.assigned_by.username if assignment.assigned_by else None,
+                'assigned_by': assignment.assigned_by.email if assignment.assigned_by else None,
                 'assigned_at': assignment.assigned_at
             })
 

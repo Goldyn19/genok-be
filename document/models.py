@@ -164,7 +164,7 @@ class PurchaseBook(models.Model):
         if self.status != 'pending':
             return False
 
-        if not user.has_perm('purchases.can_reject_purchase'):
+        if not user.has_perm('document.can_reject_purchase'):
             return False
 
         current_approval = self.get_current_approval()
