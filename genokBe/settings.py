@@ -70,11 +70,11 @@ MIDDLEWARE = [
 ]
 
 
-# CORS_ALLOWED_ORIGINS = [s.strip() for s in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if s]
+CORS_ALLOWED_ORIGINS = [s.strip() for s in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if s]
 
 CORS_ALLOW_CREDENTIALS = True
 
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS_ALLOW_ALL_ORIGINS = True
 
 ROOT_URLCONF = 'genokBe.urls'
 
