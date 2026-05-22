@@ -102,7 +102,9 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(
                     Q(name__icontains=search_term) |
                     Q(part_number__icontains=search_term) |
-                    Q(created_by__username__icontains=search_term)
+                    Q(created_by__email__icontains=search_term) |
+                    Q(created_by__first_name__icontains=search_term) |
+                    Q(created_by__last_name__icontains=search_term)
                 )
         return queryset
 
@@ -755,7 +757,7 @@ class PurchaseDashboardView(generics.GenericAPIView):
 
         creator_stats = queryset.filter(
             status='confirmed'
-        ).values('created_by__username').annotate(
+        ).values('created_by__email').annotate(
             total=Sum(F('price') * F('quantity'), default=0),
             count=Count('id')
         ).order_by('-total')[:5]
@@ -801,6 +803,17 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
         status_filter = (self.request.query_params.get('status') or '').strip()
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+
+        part_number = (self.request.query_params.get('part_number') or '').strip()
+        if part_number:
+            queryset = queryset.filter(product__part_number__icontains=part_number)
+
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            queryset = queryset.filter(
+                Q(product__part_number__icontains=q) |
+                Q(product__part_name__icontains=q)
+            )
 
         return queryset
 

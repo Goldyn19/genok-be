@@ -1,12 +1,14 @@
 # apps/purchases/serializers.py
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
+from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
 from .models import PurchaseBook, PurchaseApproval, SalesOrder, SalesOrderItem, SalesApproval
 from product.serializers import LocationSerializer, StockSerializer
 from product.models import Location, Stock
-from payments.models import CreditID
+from payments.models import CreditID, CreditTransaction
 from cart.models import CartItem
 
 User = get_user_model()
@@ -16,14 +18,18 @@ User = get_user_model()
 
 class UserBasicSerializer(serializers.ModelSerializer):
     """Basic user serializer for nested responses"""
+    username = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'full_name']
 
+    def get_username(self, obj):
+        return obj.email
+
     def get_full_name(self, obj):
-        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.email
 
 
 # ==================== PurchaseApproval Serializers ====================
@@ -32,19 +38,61 @@ class PurchaseApprovalSerializer(serializers.ModelSerializer):
     """Serializer for PurchaseApproval model"""
     approved_by_details = UserBasicSerializer(source='approved_by', read_only=True)
     required_permission = serializers.SerializerMethodField()
+    required_permission_users = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseApproval
         fields = [
             'id', 'sequence', 'status', 'reason',
             'approved_at', 'approved_by', 'approved_by_details',
-            'required_permission'
+            'required_permission', 'required_permission_users'
         ]
         read_only_fields = ['id', 'sequence', 'approved_at', 'status']
 
     def get_required_permission(self, obj):
         """Get the permission required for this approval step"""
         return obj.get_required_permission()
+
+    def get_required_permission_users(self, obj):
+        if obj.sequence == 2 and getattr(obj, 'purchase_id', None):
+            perm = Permission.objects.filter(content_type__app_label='document', codename='can_do_second_approval_purchase').first()
+            if not perm:
+                return []
+
+            from roles.models import Role
+
+            roles = Role.objects.filter(is_active=True, is_location_based=True, required_group__permissions=perm)
+            if not roles.exists():
+                return []
+
+            loc = obj.purchase.location
+            location_ids = []
+            while loc:
+                location_ids.append(loc.id)
+                loc = loc.parent
+
+            qs = User.objects.filter(
+                role_assignments__role__in=roles,
+                role_assignments__is_active=True,
+                role_assignments__location_id__in=location_ids,
+                is_active=True
+            ).distinct()
+            return UserBasicSerializer(qs, many=True).data
+
+        perm_name = obj.get_required_permission()
+        if not perm_name or '.' not in perm_name:
+            return []
+
+        app_label, codename = perm_name.split('.', 1)
+        perm = Permission.objects.filter(content_type__app_label=app_label, codename=codename).first()
+        if not perm:
+            return []
+
+        qs = User.objects.filter(
+            Q(user_permissions=perm) | Q(groups__permissions=perm),
+            is_active=True
+        ).distinct()
+        return UserBasicSerializer(qs, many=True).data
 
 
 class PurchaseApprovalCreateSerializer(serializers.ModelSerializer):
@@ -65,7 +113,7 @@ class PurchaseApprovalCreateSerializer(serializers.ModelSerializer):
 
 class PurchaseBookListSerializer(serializers.ModelSerializer):
     """Serializer for list view (lightweight)"""
-    created_by_name = serializers.ReadOnlyField(source='created_by.username')
+    created_by_name = serializers.ReadOnlyField(source='created_by.email')
     location_details = LocationSerializer(source='location', read_only=True)
     total_amount = serializers.ReadOnlyField()
     approval_progress = serializers.ReadOnlyField()
@@ -89,6 +137,7 @@ class PurchaseBookDetailSerializer(serializers.ModelSerializer):
     created_by_details = UserBasicSerializer(source='created_by', read_only=True)
     location_details = LocationSerializer(source='location', read_only=True)
     stock_details = StockSerializer(source='stock', read_only=True)
+    parent_stock_details = StockSerializer(source='parent_stock', read_only=True)
     approvals = PurchaseApprovalSerializer(many=True, read_only=True)
     approval_chain_status = serializers.SerializerMethodField()
     total_amount = serializers.ReadOnlyField()
@@ -103,7 +152,7 @@ class PurchaseBookDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'part_number', 'location', 'location_details',
             'price', 'quantity', 'total_amount', 'is_new_product',
-            'stock', 'stock_details', 'status', 'created_by', 'created_by_details',
+            'stock', 'stock_details', 'parent_stock', 'parent_stock_details', 'status', 'created_by', 'created_by_details',
             'created_at', 'updated_at', 'approvals', 'approval_chain_status',
             'approval_progress', 'current_step_number', 'current_required_permission',
             'can_current_user_approve', 'can_current_user_reject'
@@ -142,12 +191,17 @@ class PurchaseBookCreateSerializer(serializers.ModelSerializer):
         queryset=Location.objects.all(),
         help_text="Location ID where items will be stored"
     )
+    parent_stock = serializers.PrimaryKeyRelatedField(
+        queryset=Stock.objects.all(),
+        required=False,
+        allow_null=True
+    )
 
     class Meta:
         model = PurchaseBook
         fields = [
             'name', 'part_number', 'location', 'price',
-            'quantity', 'is_new_product', 'stock'
+            'quantity', 'is_new_product', 'stock', 'parent_stock'
         ]
 
     def validate(self, data):
@@ -166,6 +220,9 @@ class PurchaseBookCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'stock': 'Stock is required for existing products'}
             )
+
+        if not data.get('is_new_product'):
+            data['parent_stock'] = None
 
         # Validate stock exists and is active
         if data.get('stock'):
@@ -336,7 +393,7 @@ class PurchaseDashboardSerializer(serializers.Serializer):
 class PurchaseExportSerializer(serializers.ModelSerializer):
     """Serializer for exporting purchase data"""
     location_name = serializers.ReadOnlyField(source='location.location')
-    created_by_name = serializers.ReadOnlyField(source='created_by.username')
+    created_by_name = serializers.ReadOnlyField(source='created_by.email')
     created_by_email = serializers.ReadOnlyField(source='created_by.email')
     total_amount = serializers.ReadOnlyField()
     approval_completed_date = serializers.SerializerMethodField()
@@ -514,7 +571,7 @@ class SalesOrderCreateSerializer(serializers.Serializer):
                     'credit_customer_id': 'Required for credit sales'
                 })
 
-            credit_customer = CreditID.objects.filter(id=credit_customer_id).first()
+            credit_customer = CreditID.objects.filter(credit_id=credit_customer_id).first()
             if not credit_customer:
                 raise serializers.ValidationError({
                     'credit_customer_id': 'Credit customer not found'
@@ -540,8 +597,9 @@ class SalesOrderCreateSerializer(serializers.Serializer):
 
         with transaction.atomic():
             cart.is_checked_out = True
+            cart.is_paid = True
             cart.checked_out_at = timezone.now()
-            cart.save(update_fields=['is_checked_out', 'checked_out_at', 'updated_at'])
+            cart.save(update_fields=['is_checked_out', 'is_paid', 'checked_out_at', 'updated_at'])
 
             sales_order = SalesOrder.objects.create(
                 cart=cart,
@@ -554,15 +612,16 @@ class SalesOrderCreateSerializer(serializers.Serializer):
             sales_items = []
 
             for item in items:
-                line_total = item.quantity * item.unit_price
-                total += line_total
+                unit_price_int = int(item.unit_price)
+                line_total_int = int(item.quantity) * unit_price_int
+                total += line_total_int
 
                 sales_item = SalesOrderItem.objects.create(
                     sales_order=sales_order,
                     product=item.product,
                     quantity=item.quantity,
-                    unit_price=item.unit_price,
-                    total_price=line_total
+                    unit_price=unit_price_int,
+                    total_price=line_total_int
                 )
 
                 sales_items.append(sales_item)
@@ -575,15 +634,14 @@ class SalesOrderCreateSerializer(serializers.Serializer):
                 ])
 
             sales_order.total_amount = total
+            sales_order.save(update_fields=['total_amount'])
 
-            if payment_method == 'cash' | 'bank_transfer' | 'pos':
-                # sales_order.payment_status = 'paid'
-                sales_order.amount_paid = total
-            else:
-                sales_order.payment_status = 'credit'
-                sales_order.amount_paid = 0
-
-            sales_order.save(update_fields=['total_amount',  'amount_paid'])
+            if payment_method == 'credit' and credit_customer:
+                CreditTransaction.objects.create(
+                    customer=credit_customer,
+                    sales=sales_order,
+                    amount=total,
+                )
 
         return sales_order
 

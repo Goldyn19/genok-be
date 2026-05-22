@@ -33,6 +33,9 @@ class Stock(models.Model):
     location = models.ForeignKey(Location, on_delete=models.CASCADE)
     balance = models.IntegerField()
     price = models.IntegerField(null=True, blank=True)
+    is_caterpillar = models.BooleanField(default=True)
+    brand = models.CharField(max_length=80, blank=True, null=True)
+    is_original = models.BooleanField(default=True)
     parent = models.ForeignKey(
         "self",
         null=True,

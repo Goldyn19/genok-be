@@ -183,7 +183,10 @@ class CheckoutCartView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
         sales_order = serializer.save()
 
+        cart.refresh_from_db()
+
         return Response({
+            **CartSerializer(cart).data,
             "sales_order_id": str(sales_order.id),
             "total": sales_order.total_amount,
             "payment_method": sales_order.payment_method

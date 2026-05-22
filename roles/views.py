@@ -513,6 +513,13 @@ class UserRoleAssignmentViewSet(viewsets.ModelViewSet):
     serializer_class = UserRoleAssignmentSerializer
     permission_classes = [drf_permissions.IsAuthenticated, IsRoleManager]
 
+    def get_permissions(self):
+        if self.action in ["my_roles", "my_permissions"]:
+            permission_classes = [drf_permissions.IsAuthenticated]
+        else:
+            permission_classes = self.permission_classes
+        return [permission() for permission in permission_classes]
+
     def get_queryset(self):
         queryset = super().get_queryset()
 

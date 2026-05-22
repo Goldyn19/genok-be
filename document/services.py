@@ -40,6 +40,7 @@ class PurchaseApprovalService:
         # Verify all required permissions exist
         for step in range(1, num_steps + 1):
             perm_codename = PurchaseApprovalService._get_permission_codename_for_step(step)
+            print(perm_codename)
             if not Permission.objects.filter(codename=perm_codename).exists():
                 raise ValidationError(
                     f"Permission '{perm_codename}' does not exist. "

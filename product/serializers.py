@@ -29,7 +29,20 @@ class StockSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Stock
-        fields = ['id', 'part_number', 'part_name', 'price', 'location', 'location_detail', 'display_balance', 'balance', 'parent']
+        fields = [
+            'id',
+            'part_number',
+            'part_name',
+            'price',
+            'is_caterpillar',
+            'brand',
+            'is_original',
+            'location',
+            'location_detail',
+            'display_balance',
+            'balance',
+            'parent'
+        ]
         extra_kwargs = {
             'balance': {'write_only': True}
         }

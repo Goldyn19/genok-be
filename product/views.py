@@ -3,6 +3,7 @@ from .models import Location, Stock
 from .serializers import LocationSerializer, StockSerializer
 from rest_framework.response import Response
 from rest_framework.request import Request
+from rest_framework.pagination import PageNumberPagination
 from drf_yasg.utils import swagger_auto_schema
 from django.db.models import Q
 
@@ -224,6 +225,12 @@ class StockRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 class StockListView(generics.ListAPIView):
     serializer_class = StockSerializer
     permission_classes = [drf_permissions.IsAuthenticated]
+    class Pagination(PageNumberPagination):
+        page_size = 50
+        page_size_query_param = "page_size"
+        max_page_size = 200
+
+    pagination_class = Pagination
 
     def get_queryset(self):
         qs = Stock.objects.all().select_related('location')
@@ -232,9 +239,20 @@ class StockListView(generics.ListAPIView):
             qs = qs.filter(Q(part_name__icontains=q) | Q(part_number__icontains=q))
         return qs.order_by('part_number')
 
+    def list(self, request, *args, **kwargs):
+        wants_pagination = "page" in request.query_params or "page_size" in request.query_params
+        queryset = self.filter_queryset(self.get_queryset())
+        if wants_pagination:
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
     @swagger_auto_schema(
         operation_summary='List stock',
-        operation_description='List stock entries. Supports optional `q` search over part name/number.',
+        operation_description='List stock entries. Supports optional `q` search over part name/number. Supports pagination with `page` and `page_size`.',
         responses={200: StockSerializer(many=True)},
         tags=['Product'],
     )

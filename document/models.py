@@ -26,7 +26,9 @@ PurchaseBook_STATUS_CHOICES = (
 
 
 class PurchaseBook(models.Model):
+    # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True)
+    parent_stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='child_purchases')
     name = models.CharField(max_length=80)
     part_number = models.CharField(max_length=50)
     location = models.ForeignKey(Location, on_delete=models.CASCADE)
@@ -89,6 +91,40 @@ class PurchaseBook(models.Model):
         previous = self.approvals.filter(sequence=approval.sequence - 1).first()
         return previous and previous.status == 'confirmed'
 
+    def _location_ancestor_ids(self):
+        ids = []
+        loc = self.location
+        while loc:
+            ids.append(loc.id)
+            loc = loc.parent
+        return ids
+
+    def _can_user_approve_step_two_for_location(self, user):
+        if not user or not getattr(user, 'is_authenticated', False):
+            return False
+
+        from django.contrib.auth.models import Permission
+        from roles.models import Role, UserRoleAssignment
+
+        perm = Permission.objects.filter(content_type__app_label='document', codename='can_do_second_approval_purchase').first()
+        if not perm:
+            return False
+
+        roles = Role.objects.filter(is_active=True, is_location_based=True, required_group__permissions=perm)
+        if not roles.exists():
+            return False
+
+        location_ids = self._location_ancestor_ids()
+        if not location_ids:
+            return False
+
+        return UserRoleAssignment.objects.filter(
+            user=user,
+            role__in=roles,
+            is_active=True,
+            location_id__in=location_ids
+        ).exists()
+
     def can_approve(self, user):
         """
         Check if user can approve the current step using PERMISSIONS.
@@ -112,6 +148,9 @@ class PurchaseBook(models.Model):
         # Check if user has the PERMISSION for this step
         required_permission = self.get_approval_permission_for_step(current_approval.sequence)
         if not required_permission:
+            return False
+
+        if current_approval.sequence == 2 and not self._can_user_approve_step_two_for_location(user):
             return False
 
         return user.has_perm(required_permission)
@@ -164,6 +203,9 @@ class PurchaseBook(models.Model):
         if self.status != 'pending':
             return False
 
+        if user == self.created_by:
+            return False
+
         if not user.has_perm('document.can_reject_purchase'):
             return False
 
@@ -175,8 +217,10 @@ class PurchaseBook(models.Model):
         if not self.is_previous_approval_complete(current_approval):
             return False
 
-        # For rejection, user needs the rejection permission OR the step permission
-        return user.has_perm('purchases.can_reject_purchase')
+        if current_approval.sequence == 2 and not self._can_user_approve_step_two_for_location(user):
+            return False
+
+        return True
 
     def reject(self, user, reason=None):
         """Reject the purchase at current step"""
@@ -281,6 +325,7 @@ class PurchaseBook(models.Model):
                         location=self.location,
                         balance=self.quantity,
                         price=self.price,
+                        parent=self.parent_stock,
                     )
                     logger.info(
                         f"Purchase #{self.id} - Created new stock item #{self.stock.id} "
