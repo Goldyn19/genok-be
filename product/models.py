@@ -29,7 +29,7 @@ class Location(models.Model):
 class Stock(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     part_name = models.CharField(max_length=80)
-    part_number = models.CharField(max_length=50)
+    part_number = models.CharField(max_length=50, db_index=True)
     location = models.ForeignKey(Location, on_delete=models.CASCADE)
     balance = models.IntegerField()
     price = models.IntegerField(null=True, blank=True)
