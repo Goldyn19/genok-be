@@ -10,4 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["gunicorn", "genokBe.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8000
+
+CMD ["/entrypoint.sh"]

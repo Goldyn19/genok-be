@@ -46,10 +46,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Migrations 
-**/migrations/*.py
-**/migrations/*.pyc
-!*/migrations/__init__.py
+# Django migrations
+*/migrations/*.pyc
+*/migrations/__pycache__/
 
 # Coverage and testing
 htmlcov/
