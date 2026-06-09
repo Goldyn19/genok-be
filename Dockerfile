@@ -15,4 +15,4 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["/entrypoint.sh"]
+CMD ["/bin/sh", "/entrypoint.sh"]

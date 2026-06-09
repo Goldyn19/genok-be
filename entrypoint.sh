@@ -1,5 +1,10 @@
 #!/bin/sh
 
+echo "ENTRYPOINT STARTED"
+
+python manage.py showmigrations
+
+
 echo "Running migrations..."
 python manage.py migrate --noinput
 
