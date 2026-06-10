@@ -1,6 +1,12 @@
 from django.db import models
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractUser
+from django.utils import timezone
+from django.conf import settings
+import uuid
+import secrets
+import hashlib
+import datetime
 
 class CustomUserManager(BaseUserManager):
 
@@ -34,4 +40,54 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.first_name
+
+
+class SignupInvite(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(max_length=80)
+    token_hash = models.CharField(max_length=64, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_signup_invites",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["email", "expires_at", "used_at", "revoked_at"]),
+        ]
+
+    @staticmethod
+    def _hash_token(raw_token: str) -> str:
+        return hashlib.sha256(f"{raw_token}:{settings.SECRET_KEY}".encode("utf-8")).hexdigest()
+
+    @classmethod
+    def create_invite(cls, email: str, created_by):
+        raw = secrets.token_urlsafe(32)
+        token_hash = cls._hash_token(raw)
+        now = timezone.now()
+        invite = cls.objects.create(
+            email=email.strip().lower(),
+            token_hash=token_hash,
+            created_by=created_by,
+            expires_at=now + datetime.timedelta(hours=24),
+        )
+        return invite, raw
+
+    @classmethod
+    def get_valid_invite(cls, raw_token: str):
+        token_hash = cls._hash_token(raw_token)
+        now = timezone.now()
+        return cls.objects.filter(
+            token_hash=token_hash,
+            used_at__isnull=True,
+            revoked_at__isnull=True,
+            expires_at__gt=now,
+        ).first()
 # Create your models here.
