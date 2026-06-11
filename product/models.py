@@ -50,6 +50,9 @@ class Stock(models.Model):
 
     def __str__(self):
         return f'{self.part_name} {self.part_number}'
+    
+    class Meta:
+        unique_together = ("part_number", "is_caterpillar", "is_original", "brand")
 
 
 # Create your models here.

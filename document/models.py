@@ -34,6 +34,9 @@ class PurchaseBook(models.Model):
     location = models.ForeignKey(Location, on_delete=models.CASCADE)
     price = models.IntegerField(null=True, blank=True)
     quantity = models.IntegerField()
+    is_caterpillar = models.BooleanField(default=True)
+    brand = models.CharField(max_length=80, blank=True, null=True)
+    is_original = models.BooleanField(default=True)
     is_new_product = models.BooleanField(default=False)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_purchases')
     status = models.CharField(max_length=20, default='pending', choices=PurchaseBook_STATUS_CHOICES)
@@ -103,16 +106,7 @@ class PurchaseBook(models.Model):
         if not user or not getattr(user, 'is_authenticated', False):
             return False
 
-        from django.contrib.auth.models import Permission
-        from roles.models import Role, UserRoleAssignment
-
-        perm = Permission.objects.filter(content_type__app_label='document', codename='can_do_second_approval_purchase').first()
-        if not perm:
-            return False
-
-        roles = Role.objects.filter(is_active=True, is_location_based=True, required_group__permissions=perm)
-        if not roles.exists():
-            return False
+        from roles.models import UserRoleAssignment
 
         location_ids = self._location_ancestor_ids()
         if not location_ids:
@@ -120,7 +114,8 @@ class PurchaseBook(models.Model):
 
         return UserRoleAssignment.objects.filter(
             user=user,
-            role__in=roles,
+            role__is_active=True,
+            role__is_location_based=True,
             is_active=True,
             location_id__in=location_ids
         ).exists()
@@ -150,8 +145,8 @@ class PurchaseBook(models.Model):
         if not required_permission:
             return False
 
-        if current_approval.sequence == 2 and not self._can_user_approve_step_two_for_location(user):
-            return False
+        if current_approval.sequence == 2:
+            return self._can_user_approve_step_two_for_location(user)
 
         return user.has_perm(required_permission)
 
@@ -314,9 +309,26 @@ class PurchaseBook(models.Model):
             # or check against purchase history
             pass
 
+        normalized_brand = (self.brand or '').strip() or None
+
         # === All checks passed - proceed with atomic stock update ===
         try:
             with transaction.atomic():
+                matching_stock = (
+                    Stock.objects.select_for_update()
+                    .filter(
+                        part_number=self.part_number,
+                        is_caterpillar=self.is_caterpillar,
+                        is_original=self.is_original,
+                        brand=normalized_brand,
+                    )
+                    .first()
+                )
+
+                if matching_stock:
+                    self.stock = matching_stock
+                    self.is_new_product = False
+
                 if self.is_new_product:
                     # Create new stock item
                     self.stock = Stock.objects.create(
@@ -325,6 +337,9 @@ class PurchaseBook(models.Model):
                         location=self.location,
                         balance=self.quantity,
                         price=self.price,
+                        is_caterpillar=self.is_caterpillar,
+                        brand=normalized_brand,
+                        is_original=self.is_original,
                         parent=self.parent_stock,
                     )
                     logger.info(
@@ -349,6 +364,9 @@ class PurchaseBook(models.Model):
                         f"Purchase #{self.id} - Updated stock #{self.stock.id} "
                         f"balance from {old_balance} to {self.stock.balance}"
                     )
+
+                    self.is_new_product = False
+                    self.save(update_fields=['stock', 'is_new_product'])
 
                 # Mark as confirmed (stock updated successfully)
                 self.status = 'confirmed'

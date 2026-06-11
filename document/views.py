@@ -1,11 +1,13 @@
 # apps/purchases/views.py (Corrected version)
 
 from rest_framework import viewsets, status, permissions as drf_permissions, generics
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db.models import Q, Sum, Count, F
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.http import Http404
 from .models import PurchaseBook, PurchaseApproval, SalesOrderItem, SalesApproval
 from .serializers import (
     PurchaseBookListSerializer, PurchaseBookDetailSerializer,
@@ -39,6 +41,13 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         'location', 'created_by', 'stock'
     ).prefetch_related('approvals', 'approvals__approved_by')
 
+    class Pagination(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
+        max_page_size = 100
+
+    pagination_class = Pagination
+
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
         if self.action == 'list':
@@ -55,7 +64,9 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         """Custom permissions based on action"""
         if self.action == 'create':
             permission_classes = [drf_permissions.IsAuthenticated]
-        elif self.action in ['update', 'partial_update', 'destroy']:
+        elif self.action in ['update', 'partial_update']:
+            permission_classes = [drf_permissions.IsAuthenticated]
+        elif self.action == 'destroy':
             permission_classes = [drf_permissions.IsAuthenticated, IsRoleManager]
         else:
             permission_classes = [drf_permissions.IsAuthenticated]
@@ -81,7 +92,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
             return queryset.none()
 
         # Apply user permission filtering
-        if not user.has_perm('purchases.can_view_all_purchases'):
+        if not user.has_perm('document.can_view_all_purchases'):
             queryset = queryset.filter(created_by=user)
 
         filter_serializer = PurchaseFilterSerializer(data=self.request.query_params)
@@ -107,6 +118,39 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
                     Q(created_by__last_name__icontains=search_term)
                 )
         return queryset
+
+    def get_object(self):
+        """
+        Allow approvers to open and act on purchases that are currently assigned
+        to them even if they don't have the general "view all purchases" permission.
+        """
+        try:
+            return super().get_object()
+        except Http404:
+            if getattr(self, 'swagger_fake_view', False):
+                raise
+
+            user = getattr(self.request, 'user', None)
+            if not user or not user.is_authenticated:
+                raise
+
+            if self.action not in ['retrieve', 'approve', 'reject', 'approval_status']:
+                raise
+
+            lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+            lookup_value = self.kwargs.get(lookup_url_kwarg)
+            if lookup_value is None:
+                raise
+
+            obj = self.queryset.filter(**{self.lookup_field: lookup_value}).first()
+            if obj is None:
+                raise
+
+            if not (obj.can_approve(user) or obj.can_reject(user)):
+                raise
+
+            self.check_object_permissions(self.request, obj)
+            return obj
 
     # ==================== LIST ====================
 
@@ -179,7 +223,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         responses={
             200: PurchaseBookUpdateSerializer,
             400: "Cannot update after approvals started",
-            403: "Permission denied (requires role manager)",
+            403: "Permission denied",
             404: "Purchase not found"
         },
         tags=['Purchases']
@@ -194,13 +238,19 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         responses={
             200: PurchaseBookUpdateSerializer,
             400: "Cannot update after approvals started",
-            403: "Permission denied (requires role manager)",
+            403: "Permission denied",
             404: "Purchase not found"
         },
         tags=['Purchases']
     )
     def partial_update(self, request, *args, **kwargs):
         return super().partial_update(request, *args, **kwargs)
+
+    def perform_update(self, serializer):
+        purchase = serializer.instance
+        if purchase.created_by != self.request.user:
+            raise PermissionDenied("Only the creator can edit this purchase")
+        serializer.save()
 
     # ==================== DESTROY ====================
 
@@ -404,7 +454,13 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         """Get detailed approval status for a purchase."""
         purchase = self.get_object()
 
-        if not request.user.has_perm('purchases.can_view_all_purchases') and purchase.created_by != request.user:
+        can_access_status = (
+            purchase.created_by == request.user
+            or request.user.has_perm('document.can_view_all_purchases')
+            or purchase.can_approve(request.user)
+            or purchase.can_reject(request.user)
+        )
+        if not can_access_status:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
         chain_status = purchase.get_approval_chain_status()
@@ -453,10 +509,12 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         if status_filter:
             queryset = queryset.filter(status=status_filter)
 
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = PurchaseBookListSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+        wants_pagination = "page" in request.query_params or "page_size" in request.query_params
+        if wants_pagination:
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = PurchaseBookListSerializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
 
         serializer = PurchaseBookListSerializer(queryset, many=True)
         return Response(serializer.data)
@@ -476,6 +534,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
     def pending_approvals(self, request):
         """Get purchases pending approval from the current user."""
         user = request.user
+        search = (request.query_params.get('search') or '').strip()
 
         purchases = PurchaseBook.objects.filter(
             status='pending',
@@ -491,6 +550,22 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
                 can_approve_ids.append(purchase.id)
 
         queryset = PurchaseBook.objects.filter(id__in=can_approve_ids)
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(part_number__icontains=search) |
+                Q(status__icontains=search) |
+                Q(created_by__email__icontains=search) |
+                Q(created_by__first_name__icontains=search) |
+                Q(created_by__last_name__icontains=search)
+            )
+        wants_pagination = "page" in request.query_params or "page_size" in request.query_params
+        if wants_pagination:
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = PurchaseBookListSerializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+
         serializer = PurchaseBookListSerializer(queryset, many=True)
         return Response(serializer.data)
 

@@ -55,16 +55,6 @@ class PurchaseApprovalSerializer(serializers.ModelSerializer):
 
     def get_required_permission_users(self, obj):
         if obj.sequence == 2 and getattr(obj, 'purchase_id', None):
-            perm = Permission.objects.filter(content_type__app_label='document', codename='can_do_second_approval_purchase').first()
-            if not perm:
-                return []
-
-            from roles.models import Role
-
-            roles = Role.objects.filter(is_active=True, is_location_based=True, required_group__permissions=perm)
-            if not roles.exists():
-                return []
-
             loc = obj.purchase.location
             location_ids = []
             while loc:
@@ -72,7 +62,8 @@ class PurchaseApprovalSerializer(serializers.ModelSerializer):
                 loc = loc.parent
 
             qs = User.objects.filter(
-                role_assignments__role__in=roles,
+                role_assignments__role__is_active=True,
+                role_assignments__role__is_location_based=True,
                 role_assignments__is_active=True,
                 role_assignments__location_id__in=location_ids,
                 is_active=True
@@ -152,6 +143,7 @@ class PurchaseBookDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'part_number', 'location', 'location_details',
             'price', 'quantity', 'total_amount', 'is_new_product',
+            'brand', 'is_caterpillar', 'is_original',
             'stock', 'stock_details', 'parent_stock', 'parent_stock_details', 'status', 'created_by', 'created_by_details',
             'created_at', 'updated_at', 'approvals', 'approval_chain_status',
             'approval_progress', 'current_step_number', 'current_required_permission',
@@ -196,12 +188,16 @@ class PurchaseBookCreateSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    brand = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    is_caterpillar = serializers.BooleanField(required=False)
+    is_original = serializers.BooleanField(required=False)
 
     class Meta:
         model = PurchaseBook
         fields = [
             'name', 'part_number', 'location', 'price',
-            'quantity', 'is_new_product', 'stock', 'parent_stock'
+            'quantity', 'is_new_product', 'stock', 'parent_stock',
+            'brand', 'is_caterpillar', 'is_original'
         ]
 
     def validate(self, data):
@@ -223,6 +219,9 @@ class PurchaseBookCreateSerializer(serializers.ModelSerializer):
 
         if not data.get('is_new_product'):
             data['parent_stock'] = None
+            data['brand'] = None
+            data['is_caterpillar'] = data.get('stock').is_caterpillar if data.get('stock') else True
+            data['is_original'] = data.get('stock').is_original if data.get('stock') else True
 
         # Validate stock exists and is active
         if data.get('stock'):
@@ -261,10 +260,13 @@ class PurchaseBookUpdateSerializer(serializers.ModelSerializer):
         required=False,
         help_text="Location ID where items will be stored"
     )
+    brand = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    is_caterpillar = serializers.BooleanField(required=False)
+    is_original = serializers.BooleanField(required=False)
 
     class Meta:
         model = PurchaseBook
-        fields = ['name', 'part_number', 'location', 'price', 'quantity']
+        fields = ['name', 'part_number', 'location', 'price', 'quantity', 'brand', 'is_caterpillar', 'is_original']
         read_only_fields = ['is_new_product', 'stock']
 
     def validate(self, data):
@@ -283,6 +285,13 @@ class PurchaseBookUpdateSerializer(serializers.ModelSerializer):
         # Validate quantity if provided
         if data.get('quantity') is not None and data.get('quantity') <= 0:
             raise serializers.ValidationError({'quantity': 'Quantity must be greater than 0'})
+
+        if instance and not instance.is_new_product:
+            data['brand'] = None
+            data['is_caterpillar'] = instance.stock.is_caterpillar if instance.stock else instance.is_caterpillar
+            data['is_original'] = instance.stock.is_original if instance.stock else instance.is_original
+        elif 'brand' in data:
+            data['brand'] = (data.get('brand') or '').strip() or None
 
         return data
 
