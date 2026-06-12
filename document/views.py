@@ -491,6 +491,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         manual_parameters=[
             openapi.Parameter('status', openapi.IN_QUERY, description="Filter by status", type=openapi.TYPE_STRING,
                               enum=['pending', 'approved', 'confirmed', 'failed']),
+            openapi.Parameter('search', openapi.IN_QUERY, description="Search by name, part number, status, or location", type=openapi.TYPE_STRING),
         ],
         responses={
             200: PurchaseBookListSerializer(many=True),
@@ -508,6 +509,15 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         status_filter = request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(part_number__icontains=search) |
+                Q(status__icontains=search) |
+                Q(location__location__icontains=search)
+            )
 
         wants_pagination = "page" in request.query_params or "page_size" in request.query_params
         if wants_pagination:
