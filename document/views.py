@@ -4,6 +4,7 @@ from rest_framework import viewsets, status, permissions as drf_permissions, gen
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.db import transaction
 from django.db.models import Q, Sum, Count, F
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -528,6 +529,226 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
 
         serializer = PurchaseBookListSerializer(queryset, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='my-actions')
+    def my_actions(self, request):
+        user = request.user
+        search = (request.query_params.get('search') or '').strip().lower()
+
+        purchase_actions = (
+            PurchaseApproval.objects.select_related('purchase')
+            .prefetch_related('purchase__approvals')
+            .filter(approved_by=user)
+            .exclude(status='pending')
+        )
+        sales_actions = (
+            SalesApproval.objects.select_related('sales_order')
+            .prefetch_related('sales_order__approvals')
+            .filter(approved_by=user)
+            .exclude(status='pending')
+        )
+
+        rows = []
+
+        for a in purchase_actions:
+            purchase = a.purchase
+            approvals = list(purchase.approvals.all())
+            total_steps = max((x.sequence for x in approvals), default=a.sequence)
+            has_later_actions = any(x.sequence > a.sequence and x.status in ('confirmed', 'failed') for x in approvals)
+            is_final_step = a.sequence == total_steps
+            is_finalized = purchase.status in ('approved', 'confirmed')
+
+            can_change = not is_final_step and not is_finalized and not has_later_actions
+            blocked_reason = None
+            if is_final_step:
+                blocked_reason = "Final approval cannot be revoked"
+            elif is_finalized:
+                blocked_reason = "Purchase already finalized"
+            elif has_later_actions:
+                blocked_reason = "Next step already actioned"
+
+            decision = 'approved' if a.status == 'confirmed' else 'rejected'
+            row = {
+                'type': 'purchase',
+                'approval_id': a.id,
+                'object_id': purchase.id,
+                'step': a.sequence,
+                'decision': decision,
+                'reason': a.reason,
+                'acted_at': a.approved_at,
+                'current_status': purchase.status,
+                'name': purchase.name,
+                'part_number': purchase.part_number,
+                'quantity': purchase.quantity,
+                'can_change_decision': can_change,
+                'blocked_reason': blocked_reason,
+            }
+
+            if search:
+                hay = ' '.join(
+                    [
+                        str(row.get('object_id') or ''),
+                        row.get('name') or '',
+                        row.get('part_number') or '',
+                        row.get('decision') or '',
+                        row.get('current_status') or '',
+                        row.get('reason') or '',
+                    ]
+                ).lower()
+                if search not in hay:
+                    continue
+
+            rows.append(row)
+
+        for a in sales_actions:
+            item = a.sales_order
+            approvals = list(item.approvals.all())
+            total_steps = max((x.sequence for x in approvals), default=a.sequence)
+            has_later_actions = any(x.sequence > a.sequence and x.status in ('confirmed', 'failed') for x in approvals)
+            is_final_step = a.sequence == total_steps
+            is_finalized = item.status == 'approved'
+
+            can_change = not is_final_step and not is_finalized and not has_later_actions
+            blocked_reason = None
+            if is_final_step:
+                blocked_reason = "Final approval cannot be revoked"
+            elif is_finalized:
+                blocked_reason = "Sale already finalized"
+            elif has_later_actions:
+                blocked_reason = "Next step already actioned"
+
+            decision = 'approved' if a.status == 'confirmed' else 'rejected'
+            row = {
+                'type': 'sale',
+                'approval_id': a.id,
+                'object_id': item.id,
+                'step': a.sequence,
+                'decision': decision,
+                'reason': a.reason,
+                'acted_at': a.approved_at,
+                'current_status': item.status,
+                'name': item.part_name,
+                'part_number': item.part_number,
+                'quantity': item.quantity,
+                'can_change_decision': can_change,
+                'blocked_reason': blocked_reason,
+            }
+
+            if search:
+                hay = ' '.join(
+                    [
+                        str(row.get('object_id') or ''),
+                        row.get('name') or '',
+                        row.get('part_number') or '',
+                        row.get('decision') or '',
+                        row.get('current_status') or '',
+                        row.get('reason') or '',
+                    ]
+                ).lower()
+                if search not in hay:
+                    continue
+
+            rows.append(row)
+
+        rows.sort(key=lambda r: (r.get('acted_at') is None, r.get('acted_at')), reverse=True)
+
+        wants_pagination = "page" in request.query_params or "page_size" in request.query_params
+        if wants_pagination:
+            page = self.paginate_queryset(rows)
+            if page is not None:
+                return self.get_paginated_response(page)
+
+        return Response(rows)
+
+    @action(detail=False, methods=['post'], url_path='revoke-action')
+    def revoke_action(self, request):
+        action_type = request.data.get('type')
+        approval_id = request.data.get('approval_id')
+
+        if action_type not in ('purchase', 'sale'):
+            return Response({'error': 'Invalid type'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(approval_id, int):
+            try:
+                approval_id = int(str(approval_id))
+            except Exception:
+                return Response({'error': 'Invalid approval_id'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+
+        if action_type == 'purchase':
+            try:
+                approval = (
+                    PurchaseApproval.objects.select_related('purchase')
+                    .prefetch_related('purchase__approvals')
+                    .get(id=approval_id, approved_by=user)
+                )
+            except PurchaseApproval.DoesNotExist:
+                return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            purchase = approval.purchase
+            approvals = list(purchase.approvals.all())
+            total_steps = max((x.sequence for x in approvals), default=approval.sequence)
+            if approval.sequence == total_steps:
+                return Response({'error': 'Final approval cannot be revoked'}, status=status.HTTP_400_BAD_REQUEST)
+            if purchase.status in ('approved', 'confirmed'):
+                return Response({'error': 'Purchase already finalized'}, status=status.HTTP_400_BAD_REQUEST)
+            if approval.status not in ('confirmed', 'failed'):
+                return Response({'error': 'Nothing to revoke'}, status=status.HTTP_400_BAD_REQUEST)
+            if any(x.sequence > approval.sequence and x.status in ('confirmed', 'failed') for x in approvals):
+                return Response({'error': 'Next step already actioned'}, status=status.HTTP_400_BAD_REQUEST)
+
+            previous_status = approval.status
+
+            with transaction.atomic():
+                approval.status = 'pending'
+                approval.reason = None
+                approval.approved_at = None
+                approval.approved_by = None
+                approval.save(update_fields=['status', 'reason', 'approved_at', 'approved_by'])
+
+                if previous_status == 'failed' and purchase.status == 'failed':
+                    purchase.status = 'pending'
+                    purchase.save(update_fields=['status'])
+
+            return Response({'ok': True}, status=status.HTTP_200_OK)
+
+        try:
+            approval = (
+                SalesApproval.objects.select_related('sales_order')
+                .prefetch_related('sales_order__approvals')
+                .get(id=approval_id, approved_by=user)
+            )
+        except SalesApproval.DoesNotExist:
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        item = approval.sales_order
+        approvals = list(item.approvals.all())
+        total_steps = max((x.sequence for x in approvals), default=approval.sequence)
+        if approval.sequence == total_steps:
+            return Response({'error': 'Final approval cannot be revoked'}, status=status.HTTP_400_BAD_REQUEST)
+        if item.status == 'approved':
+            return Response({'error': 'Sale already finalized'}, status=status.HTTP_400_BAD_REQUEST)
+        if approval.status not in ('confirmed', 'failed'):
+            return Response({'error': 'Nothing to revoke'}, status=status.HTTP_400_BAD_REQUEST)
+        if any(x.sequence > approval.sequence and x.status in ('confirmed', 'failed') for x in approvals):
+            return Response({'error': 'Next step already actioned'}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_status = approval.status
+
+        with transaction.atomic():
+            approval.status = 'pending'
+            approval.reason = None
+            approval.approved_at = None
+            approval.approved_by = None
+            approval.save(update_fields=['status', 'reason', 'approved_at', 'approved_by'])
+
+            if previous_status == 'failed' and item.status == 'rejected':
+                item.status = 'pending'
+                item.save(update_fields=['status'])
+
+            item.update_parent_order_status()
+
+        return Response({'ok': True}, status=status.HTTP_200_OK)
 
     # ==================== PENDING APPROVALS ====================
 
