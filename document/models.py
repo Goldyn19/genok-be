@@ -150,7 +150,40 @@ class PurchaseBook(models.Model):
 
         return user.has_perm(required_permission)
 
-    def approve(self, user, reason=None):
+    def _temporary_step_two_location_override_allowed(self):
+        return getattr(settings, 'TEMP_STEP_TWO_LOCATION_OVERRIDE_ENABLED', True)
+
+    def _validate_step_two_location_override(self, current_approval, location_override):
+        if not location_override:
+            return
+        if not self._temporary_step_two_location_override_allowed():
+            raise ValidationError("Temporary location override is currently disabled")
+        if current_approval.sequence != 2:
+            raise ValidationError("Location can only be changed during second level approval")
+        if self.status != 'pending':
+            raise ValidationError("Location can only be changed while purchase is pending")
+        if location_override == self.location:
+            return
+        if not self.is_new_product or self.stock_id:
+            raise ValidationError("Location override is only allowed for new product purchases")
+
+        normalized_brand = (self.brand or '').strip() or None
+        matching_stock_exists = (
+            Stock.objects.filter(
+                part_number=self.part_number,
+                is_caterpillar=self.is_caterpillar,
+                is_original=self.is_original,
+                brand=normalized_brand,
+            )
+            .exclude(location=location_override)
+            .exists()
+        )
+        if matching_stock_exists:
+            raise ValidationError(
+                "Location cannot be changed for this purchase because the stock will be merged into an existing item"
+            )
+
+    def approve(self, user, reason=None, location_override=None):
         """
         Approve the current step using permission-based check.
         """
@@ -168,9 +201,20 @@ class PurchaseBook(models.Model):
                 f"Step {current_approval.sequence - 1} must be completed first."
             )
 
+        self._validate_step_two_location_override(current_approval, location_override)
+
+        approval_reason = reason
+        if location_override and location_override != self.location:
+            old_location = self.location.location
+            new_location = location_override.location
+            audit_note = f"TEMP location override: {old_location} -> {new_location}"
+            approval_reason = f"{reason.strip()} | {audit_note}" if reason and reason.strip() else audit_note
+            self.location = location_override
+            self.save(update_fields=['location', 'updated_at'])
+
         # Record the approval
         current_approval.status = 'confirmed'
-        current_approval.reason = reason
+        current_approval.reason = approval_reason
         current_approval.approved_at = timezone.now()
         current_approval.approved_by = user
         current_approval.save()

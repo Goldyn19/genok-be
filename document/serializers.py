@@ -309,6 +309,11 @@ class PurchaseBookUpdateSerializer(serializers.ModelSerializer):
 class PurchaseApproveSerializer(serializers.Serializer):
     """Serializer for approve action"""
     reason = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=500)
+    location = serializers.PrimaryKeyRelatedField(
+        queryset=Location.objects.all(),
+        required=False,
+        allow_null=True
+    )
 
     def validate_reason(self, value):
         if value and len(value) > 500:

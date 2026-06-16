@@ -322,7 +322,8 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         try:
             approval = purchase.approve(
                 user=request.user,
-                reason=serializer.validated_data.get('reason')
+                reason=serializer.validated_data.get('reason'),
+                location_override=serializer.validated_data.get('location')
             )
 
             response_data = {
