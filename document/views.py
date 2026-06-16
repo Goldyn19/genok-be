@@ -75,6 +75,9 @@ class ActivityFeedView(generics.GenericAPIView):
             kind=Value('purchase', output_field=CharField()),
             activity_id=Cast('id', output_field=CharField()),
             part_name=F('name'),
+            part_number_text=F('part_number'),
+            quantity_value=F('quantity'),
+            status_text=F('status'),
             location_name=F('location__location'),
             total=Case(
                 When(price__isnull=True, then=Value(None, output_field=IntegerField())),
@@ -82,22 +85,24 @@ class ActivityFeedView(generics.GenericAPIView):
                 output_field=IntegerField(),
             ),
             created_by_name=F('created_by__email'),
-        ).values(
-            'kind', 'activity_id', 'created_at', 'part_name', 'part_number',
-            'quantity', 'status', 'location_name', 'total', 'created_by_name'
+        ).values_list(
+            'kind', 'activity_id', 'created_at', 'part_name', 'part_number_text',
+            'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
         )
 
         sales_rows = sales.annotate(
             kind=Value('sale', output_field=CharField()),
             activity_id=Cast('id', output_field=CharField()),
             part_name=F('product__part_name'),
-            part_number=F('product__part_number'),
+            part_number_text=F('product__part_number'),
+            quantity_value=F('quantity'),
+            status_text=F('status'),
             location_name=Value('—', output_field=CharField()),
             total=F('total_price'),
             created_by_name=Value('—', output_field=CharField()),
-        ).values(
-            'kind', 'activity_id', 'created_at', 'part_name', 'part_number',
-            'quantity', 'status', 'location_name', 'total', 'created_by_name'
+        ).values_list(
+            'kind', 'activity_id', 'created_at', 'part_name', 'part_number_text',
+            'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
         )
 
         combined = purchase_rows.union(sales_rows, all=True).order_by('-created_at')
@@ -105,16 +110,16 @@ class ActivityFeedView(generics.GenericAPIView):
         rows = list(page if page is not None else combined)
         payload = [
             {
-                'kind': row['kind'],
-                'id': row['activity_id'],
-                'created_at': row['created_at'],
-                'part_name': row['part_name'],
-                'part_number': row['part_number'],
-                'quantity': row['quantity'],
-                'status': row['status'],
-                'location': row['location_name'],
-                'total': row['total'],
-                'created_by_name': row['created_by_name'],
+                'kind': row[0],
+                'id': row[1],
+                'created_at': row[2],
+                'part_name': row[3],
+                'part_number': row[4],
+                'quantity': row[5],
+                'status': row[6],
+                'location': row[7],
+                'total': row[8],
+                'created_by_name': row[9],
             }
             for row in rows
         ]
