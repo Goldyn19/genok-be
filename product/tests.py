@@ -2,7 +2,8 @@ from rest_framework.test import APITestCase
 from rest_framework import status
 from django.urls import reverse
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
+from django.core.files.uploadedfile import SimpleUploadedFile
 from .models import Location, Stock
 
 User = get_user_model()
@@ -19,6 +20,11 @@ class LocationTests(APITestCase):
         )
         # Create group
         self.group, _ = Group.objects.get_or_create(name='Location Manager')
+        perms = Permission.objects.filter(
+            content_type__app_label='product',
+            codename__in=['add_location', 'change_location', 'delete_location'],
+        )
+        self.group.permissions.set(perms)
 
         # URL
         self.create_location_url = reverse('create_location')
@@ -135,6 +141,11 @@ class StockTests(APITestCase):
             last_name='User'
         )
         self.group, _ = Group.objects.get_or_create(name='Manager Level1')
+        perms = Permission.objects.filter(
+            content_type__app_label='product',
+            codename__in=['add_stock', 'change_stock', 'delete_stock'],
+        )
+        self.group.permissions.set(perms)
         self.url = reverse('create_stock')
         self.location = Location.objects.create(location='Warehouse A')
         self.stock_data = {
@@ -142,7 +153,8 @@ class StockTests(APITestCase):
             'part_number': 'H123',
             'location': self.location.id,
             'balance': 100,
-            'price': 50
+            'price': 50,
+            'brand': 'Generic'
         }
 
     def test_create_stock_success(self):
@@ -187,3 +199,63 @@ class StockTests(APITestCase):
         response = self.client.patch(url, {'parent': str(stock.id)})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('Part cannot be its own parent', str(response.data))
+
+
+class LocationImportCSVTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='testuser2@example.com',
+            password='password123',
+            first_name='Test',
+            last_name='User'
+        )
+        self.superuser = User.objects.create_super_user(
+            email='admin@example.com',
+            password='password123',
+            first_name='Admin',
+            last_name='User'
+        )
+        self.url = reverse('import_locations_csv')
+
+    def test_import_locations_csv_requires_superuser(self):
+        csv_content = "location,parent\nFirst Floor,\nB1,First Floor\n"
+        upload = SimpleUploadedFile("locations.csv", csv_content.encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {'file': upload}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_import_locations_csv_success(self):
+        csv_content = "location,parent\nFirst Floor,\nB1,First Floor\nB2,First Floor\n"
+        upload = SimpleUploadedFile("locations.csv", csv_content.encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.post(self.url, {'file': upload}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(Location.objects.filter(location='First Floor', parent__isnull=True).count(), 1)
+        parent = Location.objects.get(location='First Floor', parent__isnull=True)
+        self.assertEqual(Location.objects.filter(location='B1', parent=parent).count(), 1)
+        self.assertEqual(Location.objects.filter(location='B2', parent=parent).count(), 1)
+
+    def test_import_locations_csv_is_idempotent(self):
+        csv_content = "location,parent\nFirst Floor,\nB1,First Floor\n"
+
+        self.client.force_authenticate(user=self.superuser)
+        upload1 = SimpleUploadedFile("locations.csv", csv_content.encode("utf-8"), content_type="text/csv")
+        response1 = self.client.post(self.url, {'file': upload1}, format='multipart')
+        self.assertEqual(response1.status_code, status.HTTP_200_OK, response1.data)
+        self.assertEqual(Location.objects.count(), 2)
+
+        upload2 = SimpleUploadedFile("locations.csv", csv_content.encode("utf-8"), content_type="text/csv")
+        response2 = self.client.post(self.url, {'file': upload2}, format='multipart')
+        self.assertEqual(response2.status_code, status.HTTP_200_OK, response2.data)
+        self.assertEqual(Location.objects.count(), 2)
+
+    def test_import_locations_csv_dry_run_does_not_write(self):
+        csv_content = "location,parent\nFirst Floor,\nB1,First Floor\n"
+        upload = SimpleUploadedFile("locations.csv", csv_content.encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.post(self.url, {'file': upload, 'dry_run': 'true'}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(Location.objects.count(), 0)

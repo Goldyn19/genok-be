@@ -1,3 +1,5 @@
+import csv
+import io
 from rest_framework import status, generics, mixins, permissions as drf_permissions
 from .models import Location, Stock
 from .serializers import LocationSerializer, StockSerializer
@@ -5,7 +7,11 @@ from rest_framework.response import Response
 from rest_framework.request import Request
 from rest_framework.pagination import PageNumberPagination
 from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 from django.db.models import Q
+from django.db import transaction
+from rest_framework.parsers import MultiPartParser, FormParser
+from roles.permissions import IsSuperuserOnly
 
 
 class LocationCreateView(generics.GenericAPIView, mixins.CreateModelMixin):
@@ -124,6 +130,192 @@ class LocationListView(generics.ListAPIView):
     )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
+
+
+class LocationImportCSVView(generics.GenericAPIView):
+    permission_classes = [drf_permissions.IsAuthenticated, IsSuperuserOnly]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @swagger_auto_schema(
+        operation_summary='Import locations from CSV',
+        operation_description='Upload a CSV file with headers `location,parent` to create nested locations. Superuser-only. Set `dry_run=true` to validate without writing.',
+        manual_parameters=[
+            openapi.Parameter('file', openapi.IN_FORM, type=openapi.TYPE_FILE, required=True),
+            openapi.Parameter('dry_run', openapi.IN_FORM, type=openapi.TYPE_BOOLEAN, required=False),
+        ],
+        responses={200: openapi.Schema(type=openapi.TYPE_OBJECT)},
+        tags=['Product'],
+    )
+    def post(self, request: Request, *args, **kwargs):
+        upload = request.FILES.get('file')
+        if upload is None:
+            return Response(
+                {'error': 'Invalid request', 'detail': 'Missing file.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        dry_raw = request.data.get('dry_run', False)
+        dry_run = str(dry_raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+        try:
+            raw = upload.read()
+            text = raw.decode('utf-8-sig')
+        except Exception:
+            return Response(
+                {'error': 'Invalid file', 'detail': 'Could not read CSV as UTF-8.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        reader = csv.DictReader(io.StringIO(text))
+        header_by_norm = {}
+        for h in (reader.fieldnames or []):
+            norm = (h or '').strip().lower()
+            if norm and norm not in header_by_norm:
+                header_by_norm[norm] = h
+
+        location_key = header_by_norm.get('location')
+        if not location_key:
+            return Response(
+                {'error': 'Invalid CSV', 'detail': 'CSV must include a `location` header.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        parent_key = None
+        for candidate in ('parent', 'parent_location'):
+            k = header_by_norm.get(candidate)
+            if k:
+                parent_key = k
+                break
+
+        if parent_key is None:
+            return Response(
+                {'error': 'Invalid CSV', 'detail': 'CSV must include a `parent` header (or `parent_location`).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        created = 0
+        existed = 0
+        total_rows = 0
+        errors = []
+
+        _MISSING = object()
+
+        class DryParent:
+            def __init__(self, name: str):
+                self.name = name
+                self.id = f'dry:{name}'
+
+        parent_cache = {}
+        child_cache = {}
+
+        def get_top_level_location(name: str):
+            cached = parent_cache.get(name, _MISSING)
+            if cached is not _MISSING:
+                return cached
+            qs = Location.objects.filter(location=name)
+            top = list(qs.filter(parent__isnull=True)[:2])
+            if len(top) == 1:
+                parent_cache[name] = top[0]
+                return top[0]
+            if len(top) > 1:
+                raise ValueError(f'Ambiguous top-level location name: {name}')
+            if qs.exists():
+                raise ValueError(f'Location name exists but is not top-level: {name}')
+            parent_cache[name] = None
+            return None
+
+        def get_or_create_location(name: str, parent_obj):
+            nonlocal created, existed
+            key = (str(getattr(parent_obj, 'id', 'null')), name)
+            cached = child_cache.get(key, _MISSING)
+            if cached is not _MISSING:
+                if cached:
+                    existed += 1
+                else:
+                    created += 1
+                return
+
+            if isinstance(parent_obj, DryParent):
+                child_cache[key] = False
+                created += 1
+                return
+
+            obj = Location.objects.filter(location=name, parent=parent_obj).first()
+            if obj is not None:
+                child_cache[key] = True
+                existed += 1
+                return
+
+            if dry_run:
+                child_cache[key] = False
+                created += 1
+                return
+
+            Location.objects.create(location=name, parent=parent_obj)
+            child_cache[key] = False
+            created += 1
+
+        with transaction.atomic():
+            for idx, row in enumerate(reader, start=2):
+                if row is None:
+                    continue
+                if not any(str(v).strip() for v in row.values() if v is not None):
+                    continue
+
+                total_rows += 1
+                location_name = (row.get(location_key) or '').strip()
+                parent_name = (row.get(parent_key) or '').strip()
+
+                if not location_name:
+                    errors.append({'row': idx, 'error': 'Missing location', 'data': row})
+                    continue
+
+                parent_obj = None
+                if parent_name:
+                    try:
+                        parent_obj = get_top_level_location(parent_name)
+                        if parent_obj is None:
+                            if dry_run:
+                                created += 1
+                                parent_obj = DryParent(parent_name)
+                                parent_cache[parent_name] = parent_obj
+                            else:
+                                parent_obj = Location.objects.create(location=parent_name, parent=None)
+                                parent_cache[parent_name] = parent_obj
+                    except ValueError as e:
+                        errors.append({'row': idx, 'error': str(e), 'data': row})
+                        continue
+
+                try:
+                    get_or_create_location(location_name, parent_obj)
+                except Exception:
+                    errors.append({'row': idx, 'error': 'Failed to create location', 'data': row})
+
+            if errors or dry_run:
+                transaction.set_rollback(True)
+
+        if errors:
+            return Response(
+                {
+                    'dry_run': dry_run,
+                    'total_rows': total_rows,
+                    'created': created,
+                    'existed': existed,
+                    'errors': errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return Response(
+            {
+                'dry_run': dry_run,
+                'total_rows': total_rows,
+                'created': created,
+                'existed': existed,
+                'errors': [],
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 class StockCreateView(generics.GenericAPIView, mixins.CreateModelMixin):
