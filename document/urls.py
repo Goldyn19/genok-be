@@ -10,6 +10,7 @@ router.register(r'sales-items', views.SalesOrderItemViewSet, basename='sales-ite
 router.register(r'sales-approvals', views.SalesApprovalViewSet, basename='sales-approval')
 
 urlpatterns = [
+    path('activity/', views.ActivityFeedView.as_view(), name='activity-feed'),
     path('', include(router.urls)),
     path('dashboard/', views.PurchaseDashboardView.as_view(), name='purchase-dashboard'),
 ]

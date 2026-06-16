@@ -5,7 +5,8 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
-from django.db.models import Q, Sum, Count, F
+from django.db.models import Q, Sum, Count, F, Value, CharField, IntegerField, Case, When, ExpressionWrapper
+from django.db.models.functions import Cast
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404
@@ -15,7 +16,7 @@ from .serializers import (
     PurchaseBookCreateSerializer, PurchaseBookUpdateSerializer,
     PurchaseApprovalSerializer, PurchaseApproveSerializer,
     PurchaseRejectSerializer, ApprovalChainUpdateSerializer,
-    PurchaseFilterSerializer, PurchaseDashboardSerializer,
+    PurchaseFilterSerializer, PurchaseDashboardSerializer, ActivityFilterSerializer,
     SalesOrderItemSerializer, SalesApprovalSerializer,
     SalesApproveSerializer, SalesRejectSerializer
 )
@@ -26,6 +27,101 @@ from drf_yasg import openapi
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class ActivityFeedView(generics.GenericAPIView):
+    permission_classes = [drf_permissions.IsAuthenticated]
+
+    class Pagination(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
+        max_page_size = 20
+
+    pagination_class = Pagination
+
+    def get(self, request):
+        serializer = ActivityFilterSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        filters = serializer.validated_data
+        user = request.user
+
+        purchases = PurchaseBook.objects.select_related('location', 'created_by')
+        if not user.has_perm('document.can_view_all_purchases'):
+            purchases = purchases.filter(created_by=user)
+
+        sales = SalesOrderItem.objects.select_related('product', 'sales_order__cart__user')
+        if not user.has_perm('document.can_view_all_sales'):
+            sales = sales.filter(sales_order__cart__user=user)
+
+        search_term = (filters.get('q') or '').strip()
+        if search_term:
+            purchases = purchases.filter(
+                Q(name__icontains=search_term) |
+                Q(part_number__icontains=search_term)
+            )
+            sales = sales.filter(
+                Q(product__part_name__icontains=search_term) |
+                Q(product__part_number__icontains=search_term)
+            )
+
+        if filters.get('from_date'):
+            purchases = purchases.filter(created_at__date__gte=filters['from_date'])
+            sales = sales.filter(created_at__date__gte=filters['from_date'])
+        if filters.get('to_date'):
+            purchases = purchases.filter(created_at__date__lte=filters['to_date'])
+            sales = sales.filter(created_at__date__lte=filters['to_date'])
+
+        purchase_rows = purchases.annotate(
+            kind=Value('purchase', output_field=CharField()),
+            activity_id=Cast('id', output_field=CharField()),
+            part_name=F('name'),
+            location_name=F('location__location'),
+            total=Case(
+                When(price__isnull=True, then=Value(None, output_field=IntegerField())),
+                default=ExpressionWrapper(F('price') * F('quantity'), output_field=IntegerField()),
+                output_field=IntegerField(),
+            ),
+            created_by_name=F('created_by__email'),
+        ).values(
+            'kind', 'activity_id', 'created_at', 'part_name', 'part_number',
+            'quantity', 'status', 'location_name', 'total', 'created_by_name'
+        )
+
+        sales_rows = sales.annotate(
+            kind=Value('sale', output_field=CharField()),
+            activity_id=Cast('id', output_field=CharField()),
+            part_name=F('product__part_name'),
+            part_number=F('product__part_number'),
+            location_name=Value('—', output_field=CharField()),
+            total=F('total_price'),
+            created_by_name=Value('—', output_field=CharField()),
+        ).values(
+            'kind', 'activity_id', 'created_at', 'part_name', 'part_number',
+            'quantity', 'status', 'location_name', 'total', 'created_by_name'
+        )
+
+        combined = purchase_rows.union(sales_rows, all=True).order_by('-created_at')
+        page = self.paginate_queryset(combined)
+        rows = list(page if page is not None else combined)
+        payload = [
+            {
+                'kind': row['kind'],
+                'id': row['activity_id'],
+                'created_at': row['created_at'],
+                'part_name': row['part_name'],
+                'part_number': row['part_number'],
+                'quantity': row['quantity'],
+                'status': row['status'],
+                'location': row['location_name'],
+                'total': row['total'],
+                'created_by_name': row['created_by_name'],
+            }
+            for row in rows
+        ]
+
+        if page is not None:
+            return self.get_paginated_response(payload)
+        return Response(payload)
 
 
 # ==================== PurchaseBook ViewSet ====================

@@ -391,6 +391,30 @@ class PurchaseFilterSerializer(serializers.Serializer):
         return data
 
 
+class ActivityFilterSerializer(serializers.Serializer):
+    """Serializer for activity feed filtering"""
+    q = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
+    from_date = serializers.DateField(required=False, allow_null=True)
+    to_date = serializers.DateField(required=False, allow_null=True)
+
+    def validate_from_date(self, value):
+        if value and value > timezone.now().date():
+            raise serializers.ValidationError("From date cannot be in the future")
+        return value
+
+    def validate_to_date(self, value):
+        if value and value > timezone.now().date():
+            raise serializers.ValidationError("To date cannot be in the future")
+        return value
+
+    def validate(self, data):
+        from_date = data.get('from_date')
+        to_date = data.get('to_date')
+        if from_date and to_date and from_date > to_date:
+            raise serializers.ValidationError("From date must be before or equal to To date")
+        return data
+
+
 # ==================== Dashboard Serializers ====================
 
 class PurchaseDashboardSerializer(serializers.Serializer):
