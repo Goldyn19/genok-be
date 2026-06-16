@@ -5,7 +5,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
-from django.db.models import Q, Sum, Count, F, Value, CharField, IntegerField, Case, When, ExpressionWrapper
+from django.db.models import Q, Sum, Count, F, Value, CharField, IntegerField, Case, When, ExpressionWrapper, OuterRef, Subquery
 from django.db.models.functions import Cast
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -22,6 +22,8 @@ from .serializers import (
 )
 from .services import PurchaseApprovalService
 from roles.permissions import IsAdminOrReadOnly, IsRoleManager
+from roles.models import UserRoleAssignment
+from product.models import Location
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 import logging
@@ -149,6 +151,49 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         max_page_size = 20
 
     pagination_class = Pagination
+
+    def _with_purchase_list_annotations(self, queryset):
+        current_step_subquery = (
+            PurchaseApproval.objects.filter(
+                purchase_id=OuterRef('pk'),
+                status='pending',
+            )
+            .order_by('sequence')
+            .values('sequence')[:1]
+        )
+        return queryset.annotate(
+            _current_step_number=Subquery(current_step_subquery),
+            _confirmed_approvals=Count('approvals', filter=Q(approvals__status='confirmed')),
+            _total_approvals=Count('approvals'),
+        )
+
+    def _get_step_two_accessible_location_ids(self, user):
+        assignment_location_ids = list(
+            UserRoleAssignment.objects.filter(
+                user=user,
+                role__is_active=True,
+                role__is_location_based=True,
+                is_active=True,
+                location_id__isnull=False,
+            ).values_list('location_id', flat=True)
+        )
+        if not assignment_location_ids:
+            return set()
+
+        children_by_parent = {}
+        for location_id, parent_id in Location.objects.values_list('id', 'parent_id'):
+            children_by_parent.setdefault(parent_id, []).append(location_id)
+
+        accessible_ids = set()
+        stack = list(set(assignment_location_ids))
+        while stack:
+            location_id = stack.pop()
+            if location_id in accessible_ids:
+                continue
+            accessible_ids.add(location_id)
+            stack.extend(children_by_parent.get(location_id, []))
+
+        return accessible_ids
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -868,21 +913,27 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         """Get purchases pending approval from the current user."""
         user = request.user
         search = (request.query_params.get('search') or '').strip()
+        step_two_location_ids = self._get_step_two_accessible_location_ids(user)
 
-        purchases = PurchaseBook.objects.filter(
-            status='pending',
-            approvals__status='pending',
-            approvals__sequence=F('approvals__sequence')
-        ).filter(
-            id__in=self.queryset.filter(status='pending').values_list('id', flat=True)
-        ).select_related('location', 'created_by')
+        queryset = self._with_purchase_list_annotations(
+            PurchaseBook.objects.filter(status='pending')
+            .exclude(created_by=user)
+            .select_related('location', 'created_by')
+        )
 
-        can_approve_ids = []
-        for purchase in purchases:
-            if purchase.can_approve(user):
-                can_approve_ids.append(purchase.id)
+        approval_filters = Q(pk__in=[])
+        if user.has_perm('document.can_do_first_approval_purchase'):
+            approval_filters |= Q(_current_step_number=1, _confirmed_approvals=0)
+        if step_two_location_ids:
+            approval_filters |= Q(
+                _current_step_number=2,
+                _confirmed_approvals=1,
+                location_id__in=step_two_location_ids,
+            )
+        if user.has_perm('document.can_do_final_approval_purchase'):
+            approval_filters |= Q(_current_step_number=3, _confirmed_approvals=2)
 
-        queryset = PurchaseBook.objects.filter(id__in=can_approve_ids)
+        queryset = queryset.filter(approval_filters)
         if search:
             queryset = queryset.filter(
                 Q(name__icontains=search) |

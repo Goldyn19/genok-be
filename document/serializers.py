@@ -107,7 +107,7 @@ class PurchaseBookListSerializer(serializers.ModelSerializer):
     created_by_name = serializers.ReadOnlyField(source='created_by.email')
     location_details = LocationSerializer(source='location', read_only=True)
     total_amount = serializers.ReadOnlyField()
-    approval_progress = serializers.ReadOnlyField()
+    approval_progress = serializers.SerializerMethodField()
     current_step = serializers.SerializerMethodField()
 
     class Meta:
@@ -119,7 +119,17 @@ class PurchaseBookListSerializer(serializers.ModelSerializer):
             'approval_progress', 'current_step'
         ]
 
+    def get_approval_progress(self, obj):
+        total = getattr(obj, '_total_approvals', None)
+        confirmed = getattr(obj, '_confirmed_approvals', None)
+        if total is not None and confirmed is not None:
+            return int((confirmed / total) * 100) if total > 0 else 0
+        return obj.approval_progress
+
     def get_current_step(self, obj):
+        annotated_step = getattr(obj, '_current_step_number', None)
+        if annotated_step is not None:
+            return annotated_step
         return obj.current_step_number
 
 
