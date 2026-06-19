@@ -198,6 +198,10 @@ class UserRoleAssignmentSerializer(serializers.ModelSerializer):
             'assigned_at', 'is_active', 'reason'
         ]
         read_only_fields = ['assigned_at', 'assigned_by']
+        # Reactivation reuses an existing inactive row via the service layer.
+        # The default unique-together validator would block that path before
+        # create() runs, so duplicate-active checks are handled in validate().
+        validators = []
 
     def get_normalized_location_name(self, obj):
         """Get the normalized location name for display"""
