@@ -127,10 +127,6 @@ class PurchaseBook(models.Model):
         if self.status != 'pending':
             return False
 
-        # Creator cannot approve their own purchase
-        if user == self.created_by:
-            return False
-
         # Get current approval step
         current_approval = self.get_current_approval()
         if not current_approval:
@@ -138,6 +134,14 @@ class PurchaseBook(models.Model):
 
         # Verify this is the correct step (previous must be complete)
         if not self.is_previous_approval_complete(current_approval):
+            return False
+
+        # Superusers can perform final approval even on their own purchases.
+        if current_approval.sequence == 3 and getattr(user, 'is_superuser', False):
+            return True
+
+        # Creator cannot approve their own purchase
+        if user == self.created_by:
             return False
 
         # Check if user has the PERMISSION for this step

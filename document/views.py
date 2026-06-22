@@ -953,6 +953,151 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         serializer = PurchaseBookListSerializer(queryset, many=True)
         return Response(serializer.data)
 
+    @swagger_auto_schema(
+        operation_summary="Get superuser final approvals",
+        operation_description="Returns purchases currently waiting on the final approval step. Superusers only.",
+        responses={
+            200: PurchaseBookListSerializer(many=True),
+            403: "Only superusers can access this endpoint"
+        },
+        tags=['Admin']
+    )
+    @action(detail=False, methods=['get'], url_path='admin-final-approvals')
+    def admin_final_approvals(self, request):
+        """Get final-step purchases for superuser approval."""
+        if not request.user.is_superuser:
+            return Response(
+                {'error': 'Only superusers can access final approvals'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        search = (request.query_params.get('search') or '').strip()
+        queryset = self._with_purchase_list_annotations(
+            PurchaseBook.objects.filter(status='pending')
+            .select_related('location', 'created_by')
+        ).filter(_current_step_number=3, _confirmed_approvals=2)
+
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(part_number__icontains=search) |
+                Q(status__icontains=search) |
+                Q(created_by__email__icontains=search) |
+                Q(created_by__first_name__icontains=search) |
+                Q(created_by__last_name__icontains=search)
+            )
+
+        wants_pagination = "page" in request.query_params or "page_size" in request.query_params
+        if wants_pagination:
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = PurchaseBookListSerializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+
+        serializer = PurchaseBookListSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @swagger_auto_schema(
+        operation_summary="Bulk approve superuser final approvals",
+        operation_description="Bulk approves purchases currently waiting on the final approval step. Superusers only.",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['purchase_ids'],
+            properties={
+                'purchase_ids': openapi.Schema(
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(type=openapi.TYPE_INTEGER),
+                ),
+                'reason': openapi.Schema(type=openapi.TYPE_STRING, nullable=True),
+            },
+        ),
+        responses={
+            200: openapi.Response(
+                description="Bulk approval results",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'approved': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_INTEGER)),
+                        'failed': openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    'error': openapi.Schema(type=openapi.TYPE_STRING),
+                                },
+                            ),
+                        ),
+                    },
+                ),
+            ),
+            400: "Validation error",
+            403: "Only superusers can access this endpoint",
+        },
+        tags=['Admin']
+    )
+    @action(detail=False, methods=['post'], url_path='admin-final-approvals/approve-bulk')
+    def admin_final_approvals_approve_bulk(self, request):
+        if not request.user.is_superuser:
+            return Response(
+                {'error': 'Only superusers can access final approvals'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        purchase_ids = request.data.get('purchase_ids')
+        if not isinstance(purchase_ids, list) or not purchase_ids:
+            return Response(
+                {'error': 'purchase_ids must be a non-empty list of integers'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        reason = request.data.get('reason')
+        if reason is not None:
+            reason = str(reason).strip() or None
+
+        approved = []
+        failed = []
+        seen = set()
+
+        for raw_id in purchase_ids:
+            try:
+                purchase_id = int(raw_id)
+            except Exception:
+                failed.append({'id': raw_id, 'error': 'Invalid purchase id'})
+                continue
+
+            if purchase_id in seen:
+                continue
+            seen.add(purchase_id)
+
+            try:
+                with transaction.atomic():
+                    purchase = (
+                        PurchaseBook.objects.select_for_update()
+                        .select_related('location', 'created_by')
+                        .prefetch_related('approvals')
+                        .get(id=purchase_id)
+                    )
+
+                    current_approval = purchase.get_current_approval()
+                    if not current_approval or current_approval.sequence != 3:
+                        failed.append({'id': purchase_id, 'error': 'Purchase is not currently in final step'})
+                        continue
+
+                    purchase.approve(user=request.user, reason=reason, location_override=None)
+                    approved.append(purchase_id)
+            except PurchaseBook.DoesNotExist:
+                failed.append({'id': purchase_id, 'error': 'Not found'})
+            except PermissionDenied as e:
+                failed.append({'id': purchase_id, 'error': str(e)})
+            except ValidationError as e:
+                failed.append({'id': purchase_id, 'error': '; '.join(e.messages)})
+            except Exception:
+                logger.exception("Bulk approval failed for purchase %s", purchase_id)
+                failed.append({'id': purchase_id, 'error': 'Unexpected error'})
+
+        return Response({'approved': approved, 'failed': failed}, status=status.HTTP_200_OK)
+
     # ==================== REGENERATE CHAIN ====================
 
     @swagger_auto_schema(
