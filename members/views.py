@@ -4,6 +4,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
+from django.utils import timezone
 from .tokens import create_jwt_pairs_for_users
 from .serializers import (
     SignUpSerializer,
@@ -12,8 +14,11 @@ from .serializers import (
     InviteCreateSerializer,
     InviteCreateResponseSerializer,
     InviteValidateResponseSerializer,
+    PasswordResetCreateSerializer,
+    PasswordResetCreateResponseSerializer,
+    PasswordResetConsumeSerializer,
 )
-from .models import SignupInvite
+from .models import SignupInvite, PasswordResetToken, User
 from drf_yasg.utils import swagger_auto_schema
 
 
@@ -126,4 +131,72 @@ class InviteValidateView(APIView):
             return Response({'valid': False}, status=status.HTTP_200_OK)
 
         return Response({'valid': True, 'email': invite.email, 'expires_at': invite.expires_at}, status=status.HTTP_200_OK)
-# Create your views here.
+
+
+class PasswordResetCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_summary='Create password reset link',
+        operation_description='Creates a 30-minute password reset token for a user. Superusers only.',
+        request_body=PasswordResetCreateSerializer,
+        responses={201: PasswordResetCreateResponseSerializer},
+        tags=['Auth'],
+    )
+    def post(self, request: Request):
+        if not getattr(request.user, 'is_superuser', False):
+            return Response({'detail': 'Only superusers can create password reset links.'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = PasswordResetCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email'].strip().lower()
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        token, raw = PasswordResetToken.create_token(user=user, created_by=request.user, ttl_minutes=30)
+        reset_path = f"/reset-password?token={raw}"
+        return Response(
+            {'token': raw, 'expires_at': token.expires_at, 'reset_path': reset_path},
+            status=status.HTTP_201_CREATED
+        )
+
+
+class PasswordResetConsumeView(APIView):
+    permission_classes = []
+
+    @swagger_auto_schema(
+        operation_summary='Reset password with token',
+        operation_description='Resets the user password using a valid reset token.',
+        request_body=PasswordResetConsumeSerializer,
+        responses={200: "Password reset successful", 400: "Invalid or expired token"},
+        tags=['Auth'],
+    )
+    def post(self, request: Request):
+        serializer = PasswordResetConsumeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        raw_token = serializer.validated_data['token'].strip()
+        new_password = serializer.validated_data['new_password']
+
+        with transaction.atomic():
+            reset = PasswordResetToken.get_valid_token(raw_token)
+            if not reset:
+                return Response({'detail': 'Invalid or expired token.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            reset = PasswordResetToken.objects.select_for_update().get(id=reset.id)
+            now = timezone.now()
+            if reset.used_at is not None or reset.revoked_at is not None or reset.expires_at <= now:
+                return Response({'detail': 'Invalid or expired token.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            user = reset.user
+            user.set_password(new_password)
+            user.save(update_fields=['password'])
+
+            reset.used_at = now
+            reset.save(update_fields=['used_at'])
+
+        return Response({'message': 'Password reset successful'}, status=status.HTTP_200_OK)

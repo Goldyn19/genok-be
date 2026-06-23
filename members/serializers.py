@@ -3,7 +3,7 @@ from rest_framework.validators import ValidationError
 from rest_framework.authtoken.models import Token
 from django.db import transaction
 from django.utils import timezone
-from .models import User, SignupInvite
+from .models import User, SignupInvite, PasswordResetToken
 
 
 class SignUpSerializer(serializers.ModelSerializer):
@@ -93,3 +93,24 @@ class TokenPairSerializer(serializers.Serializer):
 class LoginResponseSerializer(serializers.Serializer):
     message = serializers.CharField()
     tokens = TokenPairSerializer(required=False)
+
+
+class PasswordResetCreateSerializer(serializers.Serializer):
+    email = serializers.EmailField(max_length=80)
+
+
+class PasswordResetCreateResponseSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    expires_at = serializers.DateTimeField()
+    reset_path = serializers.CharField()
+
+
+class PasswordResetConsumeSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    new_password = serializers.CharField(min_length=8, write_only=True)
+
+    def validate(self, attrs):
+        token = (attrs.get('token') or '').strip()
+        if not token:
+            raise ValidationError({'token': 'token is required'})
+        return attrs
