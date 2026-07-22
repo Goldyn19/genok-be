@@ -172,14 +172,27 @@ class PurchaseBook(models.Model):
             raise ValidationError("Location override is only allowed for new product purchases")
 
         normalized_brand = (self.brand or '').strip() or None
+        override_root = location_override
+        while override_root.parent_id:
+            override_root = override_root.parent
+        purchase_root = self.location
+        while purchase_root.parent_id:
+            purchase_root = purchase_root.parent
+
+        if override_root.id == purchase_root.id:
+            return
+
+        if not self.is_new_product or self.stock_id:
+            raise ValidationError("Location override is only allowed for new product purchases")
+
         matching_stock_exists = (
             Stock.objects.filter(
                 part_number=self.part_number,
                 is_caterpillar=self.is_caterpillar,
                 is_original=self.is_original,
                 brand=normalized_brand,
-            )
-            .exclude(location=location_override)
+                top_level_location=override_root,
+            ).exclude(id=self.stock_id if self.stock_id else None)
             .exists()
         )
         if matching_stock_exists:
@@ -359,7 +372,10 @@ class PurchaseBook(models.Model):
 
         normalized_brand = (self.brand or '').strip() or None
 
-        # === All checks passed - proceed with atomic stock update ===
+        root_location = self.location
+        while root_location.parent_id:
+            root_location = root_location.parent
+
         try:
             with transaction.atomic():
                 matching_stock = (
@@ -369,6 +385,7 @@ class PurchaseBook(models.Model):
                         is_caterpillar=self.is_caterpillar,
                         is_original=self.is_original,
                         brand=normalized_brand,
+                        top_level_location=root_location,
                     )
                     .first()
                 )
@@ -378,11 +395,10 @@ class PurchaseBook(models.Model):
                     self.is_new_product = False
 
                 if self.is_new_product:
-                    # Create new stock item
                     self.stock = Stock.objects.create(
                         part_name=self.name,
                         part_number=self.part_number,
-                        location=self.location,
+                        top_level_location=root_location,
                         balance=self.quantity,
                         price=self.price,
                         is_caterpillar=self.is_caterpillar,
@@ -390,19 +406,22 @@ class PurchaseBook(models.Model):
                         is_original=self.is_original,
                         parent=self.parent_stock,
                     )
+                    self.stock.locations.add(self.location)
                     logger.info(
                         f"Purchase #{self.id} - Created new stock item #{self.stock.id} "
-                        f"with balance {self.quantity}"
+                        f"with balance {self.quantity} at top-level {root_location}"
                     )
                     self.save(update_fields=['stock'])
                 else:
-                    # Update existing stock
                     if not self.stock:
                         logger.error(
                             f"Purchase #{self.id} - is_new_product=False but stock is None. "
                             f"Cannot update stock!"
                         )
                         return False
+
+                    if not self.stock.locations.filter(id=self.location.id).exists():
+                        self.stock.locations.add(self.location)
 
                     old_balance = self.stock.balance
                     self.stock.balance += self.quantity
@@ -416,13 +435,9 @@ class PurchaseBook(models.Model):
                     self.is_new_product = False
                     self.save(update_fields=['stock', 'is_new_product'])
 
-                # Mark as confirmed (stock updated successfully)
                 self.status = 'confirmed'
                 self.save(update_fields=['status'])
-
-                # Mark that stock has been updated (on the instance, not DB)
                 self._stock_updated = True
-
                 return True
 
         except Exception as e:

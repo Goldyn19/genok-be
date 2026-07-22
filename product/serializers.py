@@ -20,11 +20,18 @@ class LocationSerializer(serializers.ModelSerializer):
 
 
 class StockSerializer(serializers.ModelSerializer):
-    location = serializers.PrimaryKeyRelatedField(
+    top_level_location = serializers.PrimaryKeyRelatedField(
         queryset=Location.objects.all(),
-        write_only=True
+        required=False,
+        allow_null=True,
     )
-    location_detail = LocationSerializer(source='location', read_only=True)
+    top_level_location_detail = LocationSerializer(source='top_level_location', read_only=True)
+    locations = serializers.PrimaryKeyRelatedField(
+        queryset=Location.objects.all(),
+        many=True,
+        required=False,
+    )
+    locations_details = LocationSerializer(source='locations', many=True, read_only=True)
     display_balance = serializers.ReadOnlyField(source="balance")
 
     class Meta:
@@ -37,8 +44,10 @@ class StockSerializer(serializers.ModelSerializer):
             'is_caterpillar',
             'brand',
             'is_original',
-            'location',
-            'location_detail',
+            'top_level_location',
+            'top_level_location_detail',
+            'locations',
+            'locations_details',
             'display_balance',
             'balance',
             'parent'
@@ -53,7 +62,30 @@ class StockSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Part cannot be its own parent")
         return attrs
 
+    def validate_locations(self, value):
+        top_level = self.instance.top_level_location if self.instance else None
+        if not top_level and not self.initial_data.get('top_level_location'):
+            return value
+        target_root = top_level
+        if not target_root:
+            raise serializers.ValidationError(
+                "top_level_location must be set before adding locations"
+            )
+        for loc in value:
+            root = loc
+            while root.parent_id:
+                root = root.parent
+            if root.id != target_root.id:
+                raise serializers.ValidationError(
+                    f"Location '{loc.location}' does not belong to top-level location '{target_root.location}'"
+                )
+        return value
+
     def update(self, instance, validated_data):
         if 'balance' in validated_data:
             raise serializers.ValidationError({'balance': 'balance cannot be edited after stock creation'})
-        return super().update(instance, validated_data)
+        locations_data = validated_data.pop('locations', None)
+        result = super().update(instance, validated_data)
+        if locations_data is not None:
+            instance.locations.set(locations_data)
+        return result
