@@ -581,6 +581,21 @@ class SalesOrder(models.Model):
     )
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     cart = models.OneToOneField(Cart, on_delete=models.SET_NULL, null=True, related_name='sales_order')
+    sold_at = models.DateTimeField(default=timezone.now, db_index=True)
+    sold_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sales_made'
+    )
+    entered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sales_entered'
+    )
 
     credit_customer = models.ForeignKey(
         'payments.CreditID',
@@ -598,6 +613,11 @@ class SalesOrder(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     notes = models.TextField(blank=True)
+
+    class Meta:
+        permissions = [
+            ("can_backdate_sale", "Can create backdated sales and assign salesperson"),
+        ]
 
 
 class SalesOrderItem(models.Model):

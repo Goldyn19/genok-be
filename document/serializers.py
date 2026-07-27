@@ -501,6 +501,11 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source='product.part_name', read_only=True)
     part_number = serializers.CharField(source='product.part_number', read_only=True)
     approvals = SalesApprovalSerializer(many=True, read_only=True)
+    sold_at = serializers.SerializerMethodField()
+    sold_by = serializers.PrimaryKeyRelatedField(source='sales_order.sold_by', read_only=True)
+    sold_by_details = UserBasicSerializer(source='sales_order.sold_by', read_only=True)
+    entered_by = serializers.PrimaryKeyRelatedField(source='sales_order.entered_by', read_only=True)
+    entered_by_details = UserBasicSerializer(source='sales_order.entered_by', read_only=True)
 
     class Meta:
         model = SalesOrderItem
@@ -513,10 +518,18 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             'unit_price',
             'total_price',
             'status',
+            'sold_at',
+            'sold_by',
+            'sold_by_details',
+            'entered_by',
+            'entered_by_details',
             'approvals',
             'created_at',
         ]
         read_only_fields = ['id', 'total_price', 'created_at']
+
+    def get_sold_at(self, obj):
+        return obj.sales_order.sold_at or obj.sales_order.created_at or obj.created_at
 
 
 # ==================== SalesOrder List ====================
@@ -525,6 +538,9 @@ class SalesOrderListSerializer(serializers.ModelSerializer):
     total_items = serializers.SerializerMethodField()
     approval_progress = serializers.ReadOnlyField()
     current_step = serializers.SerializerMethodField()
+    sold_at = serializers.SerializerMethodField()
+    sold_by_details = UserBasicSerializer(source='sold_by', read_only=True)
+    entered_by_details = UserBasicSerializer(source='entered_by', read_only=True)
 
     class Meta:
         model = SalesOrder
@@ -533,6 +549,11 @@ class SalesOrderListSerializer(serializers.ModelSerializer):
             'status',
             'payment_method',
             'total_amount',
+            'sold_at',
+            'sold_by',
+            'sold_by_details',
+            'entered_by',
+            'entered_by_details',
             'created_at',
             'approval_progress',
             'current_step',
@@ -545,12 +566,18 @@ class SalesOrderListSerializer(serializers.ModelSerializer):
     def get_current_step(self, obj):
         return obj.current_step_number
 
+    def get_sold_at(self, obj):
+        return obj.sold_at or obj.created_at
+
 
 # ==================== SalesOrder Detail ====================
 
 class SalesOrderDetailSerializer(serializers.ModelSerializer):
     items = SalesOrderItemSerializer(many=True, read_only=True)
     approvals = SalesApprovalSerializer(many=True, read_only=True)
+    sold_at = serializers.SerializerMethodField()
+    sold_by_details = UserBasicSerializer(source='sold_by', read_only=True)
+    entered_by_details = UserBasicSerializer(source='entered_by', read_only=True)
 
     approval_chain_status = serializers.SerializerMethodField()
     approval_progress = serializers.ReadOnlyField()
@@ -569,6 +596,11 @@ class SalesOrderDetailSerializer(serializers.ModelSerializer):
             'payment_method',
             'status',
             'total_amount',
+            'sold_at',
+            'sold_by',
+            'sold_by_details',
+            'entered_by',
+            'entered_by_details',
             'notes',
             'items',
             'approvals',
@@ -594,6 +626,9 @@ class SalesOrderDetailSerializer(serializers.ModelSerializer):
 
         return chain
 
+    def get_sold_at(self, obj):
+        return obj.sold_at or obj.created_at
+
     def get_can_current_user_approve(self, obj):
         request = self.context.get('request')
         return obj.can_approve(request.user) if request else False
@@ -608,10 +643,15 @@ class SalesOrderDetailSerializer(serializers.ModelSerializer):
 class SalesOrderCreateSerializer(serializers.Serializer):
     payment_method = serializers.ChoiceField(choices=SalesOrder.PAYMENT_METHODS)
     credit_customer_id = serializers.UUIDField(required=False)
+    sold_at = serializers.DateTimeField(required=False)
+    sold_by = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True), required=False)
 
     def validate(self, data):
+        request = self.context.get('request')
         payment_method = data.get('payment_method')
         credit_customer_id = data.get('credit_customer_id')
+        sold_at = data.get('sold_at')
+        sold_by = data.get('sold_by')
 
         if payment_method == 'credit':
             if not credit_customer_id:
@@ -626,6 +666,26 @@ class SalesOrderCreateSerializer(serializers.Serializer):
                 })
 
             data['credit_customer'] = credit_customer
+
+        if sold_at and sold_at > timezone.now():
+            raise serializers.ValidationError({
+                'sold_at': 'Sale date cannot be in the future'
+            })
+
+        if request and sold_at and sold_at < timezone.now() and not request.user.has_perm('document.can_backdate_sale'):
+            raise serializers.ValidationError({
+                'sold_at': 'You do not have permission to create backdated sales'
+            })
+
+        if request and sold_by and sold_by != request.user and not request.user.has_perm('document.can_backdate_sale'):
+            raise serializers.ValidationError({
+                'sold_by': 'You do not have permission to assign sales to another user'
+            })
+
+        if request:
+            data.setdefault('sold_at', timezone.now())
+            data.setdefault('sold_by', request.user)
+            data['entered_by'] = request.user
 
         return data
 
@@ -642,6 +702,9 @@ class SalesOrderCreateSerializer(serializers.Serializer):
 
         payment_method = validated_data['payment_method']
         credit_customer = validated_data.get('credit_customer')
+        sold_at = validated_data.get('sold_at') or timezone.now()
+        sold_by = validated_data.get('sold_by') or request.user
+        entered_by = validated_data.get('entered_by') or request.user
 
         with transaction.atomic():
             cart.is_checked_out = True
@@ -651,6 +714,9 @@ class SalesOrderCreateSerializer(serializers.Serializer):
 
             sales_order = SalesOrder.objects.create(
                 cart=cart,
+                sold_at=sold_at,
+                sold_by=sold_by,
+                entered_by=entered_by,
                 credit_customer=credit_customer,
                 payment_method=payment_method,
                 status='pending'

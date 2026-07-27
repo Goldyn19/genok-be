@@ -51,9 +51,15 @@ class ActivityFeedView(generics.GenericAPIView):
         if not user.has_perm('document.can_view_all_purchases'):
             purchases = purchases.filter(created_by=user)
 
-        sales = SalesOrderItem.objects.select_related('product', 'sales_order__cart__user')
+        sales = SalesOrderItem.objects.select_related(
+            'product', 'sales_order__cart__user', 'sales_order__sold_by', 'sales_order__entered_by'
+        )
         if not user.has_perm('document.can_view_all_sales'):
-            sales = sales.filter(sales_order__cart__user=user)
+            sales = sales.filter(
+                Q(sales_order__sold_by=user) |
+                Q(sales_order__entered_by=user) |
+                Q(sales_order__cart__user=user)
+            )
 
         search_term = (filters.get('q') or '').strip()
         if search_term:
@@ -68,10 +74,10 @@ class ActivityFeedView(generics.GenericAPIView):
 
         if filters.get('from_date'):
             purchases = purchases.filter(created_at__date__gte=filters['from_date'])
-            sales = sales.filter(created_at__date__gte=filters['from_date'])
+            sales = sales.filter(sales_order__sold_at__date__gte=filters['from_date'])
         if filters.get('to_date'):
             purchases = purchases.filter(created_at__date__lte=filters['to_date'])
-            sales = sales.filter(created_at__date__lte=filters['to_date'])
+            sales = sales.filter(sales_order__sold_at__date__lte=filters['to_date'])
 
         purchase_rows = purchases.annotate(
             kind=Value('purchase', output_field=CharField()),
@@ -101,9 +107,9 @@ class ActivityFeedView(generics.GenericAPIView):
             status_text=F('status'),
             location_name=Value('—', output_field=CharField()),
             total=F('total_price'),
-            created_by_name=Value('—', output_field=CharField()),
+            created_by_name=F('sales_order__sold_by__email'),
         ).values_list(
-            'kind', 'activity_id', 'created_at', 'part_name', 'part_number_text',
+            'kind', 'activity_id', 'sales_order__sold_at', 'part_name', 'part_number_text',
             'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
         )
 
@@ -1386,7 +1392,7 @@ class PurchaseDashboardView(generics.GenericAPIView):
 
 class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = SalesOrderItem.objects.select_related(
-        'sales_order', 'sales_order__cart', 'product'
+        'sales_order', 'sales_order__cart', 'sales_order__sold_by', 'sales_order__entered_by', 'product'
     ).prefetch_related('approvals', 'approvals__approved_by')
     serializer_class = SalesOrderItemSerializer
     permission_classes = [drf_permissions.IsAuthenticated]
@@ -1402,7 +1408,11 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
             return queryset.none()
 
         if not user.has_perm('document.can_view_all_sales'):
-            queryset = queryset.filter(sales_order__cart__user=user)
+            queryset = queryset.filter(
+                Q(sales_order__sold_by=user) |
+                Q(sales_order__entered_by=user) |
+                Q(sales_order__cart__user=user)
+            )
 
         status_filter = (self.request.query_params.get('status') or '').strip()
         if status_filter:
@@ -1544,6 +1554,7 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
             'current_required_permission': sales_item.get_approval_permission_for_step(self._current_step(sales_item)) if self._current_step(sales_item) else None,
             'total_amount': sales_item.total_price,
             'created_at': sales_item.created_at,
+            'sold_at': sales_item.sales_order.sold_at or sales_item.created_at,
             'approval_chain': self._approval_chain_status(sales_item),
             'can_approve': sales_item.can_approve(request.user),
             'can_reject': request.user.has_perm('document.can_reject_sale')
@@ -1557,7 +1568,7 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
     )
     @action(detail=False, methods=['get'], url_path='my-sales')
     def my_sales(self, request):
-        queryset = self.get_queryset().filter(sales_order__cart__user=request.user)
+        queryset = self.get_queryset().filter(sales_order__sold_by=request.user)
         serializer = SalesOrderItemSerializer(queryset, many=True)
         return Response(serializer.data)
 
