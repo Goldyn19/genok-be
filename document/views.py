@@ -695,7 +695,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
             .exclude(status='pending')
         )
         sales_actions = (
-            SalesApproval.objects.select_related('sales_order')
+            SalesApproval.objects.select_related('sales_order', 'sales_order__product')
             .prefetch_related('sales_order__approvals')
             .filter(approved_by=user)
             .exclude(status='pending')
@@ -755,6 +755,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
 
         for a in sales_actions:
             item = a.sales_order
+            product = item.product
             approvals = list(item.approvals.all())
             total_steps = max((x.sequence for x in approvals), default=a.sequence)
             has_later_actions = any(x.sequence > a.sequence and x.status in ('confirmed', 'failed') for x in approvals)
@@ -780,8 +781,8 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
                 'reason': a.reason,
                 'acted_at': a.approved_at,
                 'current_status': item.status,
-                'name': item.part_name,
-                'part_number': item.part_number,
+                'name': product.part_name if product else '',
+                'part_number': product.part_number if product else '',
                 'quantity': item.quantity,
                 'can_change_decision': can_change,
                 'blocked_reason': blocked_reason,
