@@ -185,21 +185,6 @@ class PurchaseBook(models.Model):
         if not self.is_new_product or self.stock_id:
             raise ValidationError("Location override is only allowed for new product purchases")
 
-        matching_stock_exists = (
-            Stock.objects.filter(
-                part_number=self.part_number,
-                is_caterpillar=self.is_caterpillar,
-                is_original=self.is_original,
-                brand=normalized_brand,
-                top_level_location=override_root,
-            ).exclude(id=self.stock_id if self.stock_id else None)
-            .exists()
-        )
-        if matching_stock_exists:
-            raise ValidationError(
-                "Location cannot be changed for this purchase because the stock will be merged into an existing item"
-            )
-
     def approve(self, user, reason=None, location_override=None):
         """
         Approve the current step using permission-based check.
