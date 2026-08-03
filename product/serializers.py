@@ -56,25 +56,62 @@ class StockSerializer(serializers.ModelSerializer):
             'balance': {'write_only': True}
         }
 
+    def _location_root(self, location):
+        root = location
+        while root.parent_id:
+            root = root.parent
+        return root
+
     def validate(self, attrs):
         parent = attrs.get("parent")
         if self.instance is not None and parent == self.instance:
             raise serializers.ValidationError("Part cannot be its own parent")
+
+        target_top_level = attrs.get('top_level_location')
+        if target_top_level is None and self.instance is not None:
+            target_top_level = self.instance.top_level_location
+
+        locations = attrs.get('locations')
+        if locations is None and self.instance is not None:
+            locations = list(self.instance.locations.all())
+
+        if locations:
+            roots = [self._location_root(loc) for loc in locations]
+            first_root = roots[0]
+
+            if any(root.id != first_root.id for root in roots[1:]):
+                raise serializers.ValidationError({
+                    'locations': 'All locations must belong to the same top-level location.'
+                })
+
+            if target_top_level is None:
+                attrs['top_level_location'] = first_root
+                target_top_level = first_root
+
+            if first_root.id != target_top_level.id:
+                raise serializers.ValidationError({
+                    'locations': (
+                        f"Selected locations belong to top-level location '{first_root.location}', "
+                        f"but top_level_location is '{target_top_level.location}'."
+                    )
+                })
+
         return attrs
 
     def validate_locations(self, value):
-        top_level = self.instance.top_level_location if self.instance else None
-        if not top_level and not self.initial_data.get('top_level_location'):
-            return value
-        target_root = top_level
+        target_root = None
+
+        raw_top_level = self.initial_data.get('top_level_location')
+        if raw_top_level not in (None, '', []):
+            target_root = Location.objects.filter(pk=raw_top_level).first()
+        elif self.instance is not None:
+            target_root = self.instance.top_level_location
+
         if not target_root:
-            raise serializers.ValidationError(
-                "top_level_location must be set before adding locations"
-            )
+            return value
+
         for loc in value:
-            root = loc
-            while root.parent_id:
-                root = root.parent
+            root = self._location_root(loc)
             if root.id != target_root.id:
                 raise serializers.ValidationError(
                     f"Location '{loc.location}' does not belong to top-level location '{target_root.location}'"
