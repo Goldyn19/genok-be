@@ -33,7 +33,12 @@ class UserCartListView(mixins.ListModelMixin, generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Cart.objects.filter(user=self.request.user).order_by("-created_at")
+        return (
+            Cart.objects.filter(user=self.request.user)
+            .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
+            .prefetch_related('items', 'sales_order__items__approvals')
+            .order_by("-created_at")
+        )
 
     @swagger_auto_schema(
         operation_summary='List my carts',
@@ -51,7 +56,11 @@ class CartDetailView(mixins.RetrieveModelMixin, generics.GenericAPIView):
     lookup_field = "id"
 
     def get_queryset(self):
-        return Cart.objects.filter(user=self.request.user)
+        return (
+            Cart.objects.filter(user=self.request.user)
+            .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
+            .prefetch_related('items', 'sales_order__items__approvals')
+        )
 
     @swagger_auto_schema(
         operation_summary='Get cart',
@@ -69,7 +78,11 @@ class UpdateCartView(mixins.UpdateModelMixin, generics.GenericAPIView):
     lookup_field = "id"
 
     def get_queryset(self):
-        return Cart.objects.filter(user=self.request.user)
+        return (
+            Cart.objects.filter(user=self.request.user)
+            .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
+            .prefetch_related('items', 'sales_order__items__approvals')
+        )
 
     @swagger_auto_schema(
         operation_summary='Update cart',
@@ -171,7 +184,11 @@ class CheckoutCartView(generics.GenericAPIView):
     lookup_field = "id"
 
     def get_queryset(self):
-        return Cart.objects.filter(user=self.request.user)
+        return (
+            Cart.objects.filter(user=self.request.user)
+            .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
+            .prefetch_related('items', 'sales_order__items__approvals')
+        )
 
     def post(self, request, *args, **kwargs):
         cart = self.get_object()
