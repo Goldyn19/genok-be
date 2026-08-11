@@ -29,8 +29,17 @@ class CartSerializer(serializers.ModelSerializer):
         sales_order = getattr(obj, 'sales_order', None)
         if not sales_order:
             return None
+        from document.serializers import SalesOrderItemSerializer
 
-        items = list(sales_order.items.all().prefetch_related('approvals'))
+        items = list(
+            sales_order.items.all().prefetch_related(
+                'approvals',
+                'returns',
+                'returns__returned_by',
+                'returns__approvals',
+                'returns__approvals__approved_by',
+            )
+        )
         total_approvals = 0
         confirmed_approvals = 0
         current_steps = []
@@ -43,12 +52,21 @@ class CartSerializer(serializers.ModelSerializer):
             if pending_steps:
                 current_steps.append(min(pending_steps))
 
+        if not items:
+            sales_status = 'pending'
+        elif any(item.status == 'rejected' for item in items):
+            sales_status = 'rejected'
+        elif all(item.status == 'approved' for item in items):
+            sales_status = 'returned' if all(item.remaining_returnable_quantity == 0 for item in items) else 'approved'
+        else:
+            sales_status = 'pending'
+
         approval_progress = int((confirmed_approvals / total_approvals) * 100) if total_approvals > 0 else 0
-        current_step = min(current_steps) if current_steps else None
+        current_step = min(current_steps) if sales_status == 'pending' and current_steps else None
 
         return {
             'id': str(sales_order.id),
-            'status': sales_order.status,
+            'status': sales_status,
             'payment_method': sales_order.payment_method,
             'total_amount': sales_order.total_amount,
             'sold_at': sales_order.sold_at or sales_order.created_at,
@@ -60,6 +78,7 @@ class CartSerializer(serializers.ModelSerializer):
             'approval_progress': approval_progress,
             'current_step': current_step,
             'total_items': len(items),
+            'items': SalesOrderItemSerializer(items, many=True, context=self.context).data,
         }
 
     class Meta:

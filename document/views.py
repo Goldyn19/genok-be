@@ -10,7 +10,7 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404
-from .models import PurchaseBook, PurchaseApproval, SalesOrderItem, SalesApproval
+from .models import PurchaseBook, PurchaseApproval, SalesOrderItem, SalesApproval, SalesReturnItem, SalesReturnApproval
 from .serializers import (
     PurchaseBookListSerializer, PurchaseBookDetailSerializer,
     PurchaseBookCreateSerializer, PurchaseBookUpdateSerializer,
@@ -18,7 +18,9 @@ from .serializers import (
     PurchaseRejectSerializer, ApprovalChainUpdateSerializer,
     PurchaseFilterSerializer, PurchaseDashboardSerializer, ActivityFilterSerializer,
     SalesOrderItemSerializer, SalesApprovalSerializer,
-    SalesApproveSerializer, SalesRejectSerializer
+    SalesApproveSerializer, SalesRejectSerializer,
+    SalesReturnItemSerializer, SalesReturnCreateSerializer,
+    SalesReturnApproveSerializer, SalesReturnRejectSerializer
 )
 from .services import PurchaseApprovalService
 from roles.permissions import IsAdminOrReadOnly, IsRoleManager
@@ -700,6 +702,14 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
             .filter(approved_by=user)
             .exclude(status='pending')
         )
+        return_actions = (
+            SalesReturnApproval.objects.select_related(
+                'sales_return', 'sales_return__sales_item', 'sales_return__sales_item__product'
+            )
+            .prefetch_related('sales_return__approvals')
+            .filter(approved_by=user)
+            .exclude(status='pending')
+        )
 
         rows = []
 
@@ -804,6 +814,58 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
 
             rows.append(row)
 
+        for a in return_actions:
+            return_item = a.sales_return
+            sales_item = return_item.sales_item
+            product = sales_item.product
+            approvals = list(return_item.approvals.all())
+            total_steps = max((x.sequence for x in approvals), default=a.sequence)
+            has_later_actions = any(x.sequence > a.sequence and x.status in ('confirmed', 'failed') for x in approvals)
+            is_final_step = a.sequence == total_steps
+            is_finalized = return_item.status in ('approved', 'rejected')
+
+            can_change = not is_final_step and not is_finalized and not has_later_actions
+            blocked_reason = None
+            if is_final_step:
+                blocked_reason = "Final approval cannot be revoked"
+            elif is_finalized:
+                blocked_reason = "Return request already finalized"
+            elif has_later_actions:
+                blocked_reason = "Next step already actioned"
+
+            decision = 'approved' if a.status == 'confirmed' else 'rejected'
+            row = {
+                'type': 'sale_return',
+                'approval_id': a.id,
+                'object_id': str(return_item.id),
+                'step': a.sequence,
+                'decision': decision,
+                'reason': a.reason,
+                'acted_at': a.approved_at,
+                'current_status': return_item.status,
+                'name': product.part_name if product else '',
+                'part_number': product.part_number if product else '',
+                'quantity': return_item.quantity,
+                'can_change_decision': can_change,
+                'blocked_reason': blocked_reason,
+            }
+
+            if search:
+                hay = ' '.join(
+                    [
+                        str(row.get('object_id') or ''),
+                        row.get('name') or '',
+                        row.get('part_number') or '',
+                        row.get('decision') or '',
+                        row.get('current_status') or '',
+                        row.get('reason') or '',
+                    ]
+                ).lower()
+                if search not in hay:
+                    continue
+
+            rows.append(row)
+
         rows.sort(key=lambda r: (r.get('acted_at') is None, r.get('acted_at')), reverse=True)
 
         wants_pagination = "page" in request.query_params or "page_size" in request.query_params
@@ -819,7 +881,7 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
         action_type = request.data.get('type')
         approval_id = request.data.get('approval_id')
 
-        if action_type not in ('purchase', 'sale'):
+        if action_type not in ('purchase', 'sale', 'sale_return'):
             return Response({'error': 'Invalid type'}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(approval_id, int):
             try:
@@ -866,22 +928,61 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
 
             return Response({'ok': True}, status=status.HTTP_200_OK)
 
+        if action_type == 'sale':
+            try:
+                approval = (
+                    SalesApproval.objects.select_related('sales_order')
+                    .prefetch_related('sales_order__approvals')
+                    .get(id=approval_id, approved_by=user)
+                )
+            except SalesApproval.DoesNotExist:
+                return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            item = approval.sales_order
+            approvals = list(item.approvals.all())
+            total_steps = max((x.sequence for x in approvals), default=approval.sequence)
+            if approval.sequence == total_steps:
+                return Response({'error': 'Final approval cannot be revoked'}, status=status.HTTP_400_BAD_REQUEST)
+            if item.status == 'approved':
+                return Response({'error': 'Sale already finalized'}, status=status.HTTP_400_BAD_REQUEST)
+            if approval.status not in ('confirmed', 'failed'):
+                return Response({'error': 'Nothing to revoke'}, status=status.HTTP_400_BAD_REQUEST)
+            if any(x.sequence > approval.sequence and x.status in ('confirmed', 'failed') for x in approvals):
+                return Response({'error': 'Next step already actioned'}, status=status.HTTP_400_BAD_REQUEST)
+
+            previous_status = approval.status
+
+            with transaction.atomic():
+                approval.status = 'pending'
+                approval.reason = None
+                approval.approved_at = None
+                approval.approved_by = None
+                approval.save(update_fields=['status', 'reason', 'approved_at', 'approved_by'])
+
+                if previous_status == 'failed' and item.status == 'rejected':
+                    item.status = 'pending'
+                    item.save(update_fields=['status'])
+
+                item.update_parent_order_status()
+
+            return Response({'ok': True}, status=status.HTTP_200_OK)
+
         try:
             approval = (
-                SalesApproval.objects.select_related('sales_order')
-                .prefetch_related('sales_order__approvals')
+                SalesReturnApproval.objects.select_related('sales_return')
+                .prefetch_related('sales_return__approvals', 'sales_return__sales_item__sales_order')
                 .get(id=approval_id, approved_by=user)
             )
-        except SalesApproval.DoesNotExist:
+        except SalesReturnApproval.DoesNotExist:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        item = approval.sales_order
-        approvals = list(item.approvals.all())
+        return_item = approval.sales_return
+        approvals = list(return_item.approvals.all())
         total_steps = max((x.sequence for x in approvals), default=approval.sequence)
         if approval.sequence == total_steps:
             return Response({'error': 'Final approval cannot be revoked'}, status=status.HTTP_400_BAD_REQUEST)
-        if item.status == 'approved':
-            return Response({'error': 'Sale already finalized'}, status=status.HTTP_400_BAD_REQUEST)
+        if return_item.status in ('approved', 'rejected'):
+            return Response({'error': 'Return request already finalized'}, status=status.HTTP_400_BAD_REQUEST)
         if approval.status not in ('confirmed', 'failed'):
             return Response({'error': 'Nothing to revoke'}, status=status.HTTP_400_BAD_REQUEST)
         if any(x.sequence > approval.sequence and x.status in ('confirmed', 'failed') for x in approvals):
@@ -896,11 +997,11 @@ class PurchaseBookViewSet(viewsets.ModelViewSet):
             approval.approved_by = None
             approval.save(update_fields=['status', 'reason', 'approved_at', 'approved_by'])
 
-            if previous_status == 'failed' and item.status == 'rejected':
-                item.status = 'pending'
-                item.save(update_fields=['status'])
+            if previous_status == 'failed' and return_item.status == 'rejected':
+                return_item.status = 'pending'
+                return_item.save(update_fields=['status'])
 
-            item.update_parent_order_status()
+            return_item.sales_item.sales_order.recalculate_status()
 
         return Response({'ok': True}, status=status.HTTP_200_OK)
 
@@ -1394,7 +1495,14 @@ class PurchaseDashboardView(generics.GenericAPIView):
 class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = SalesOrderItem.objects.select_related(
         'sales_order', 'sales_order__cart', 'sales_order__sold_by', 'sales_order__entered_by', 'product'
-    ).prefetch_related('approvals', 'approvals__approved_by')
+    ).prefetch_related(
+        'approvals',
+        'approvals__approved_by',
+        'returns',
+        'returns__returned_by',
+        'returns__approvals',
+        'returns__approvals__approved_by',
+    )
     serializer_class = SalesOrderItemSerializer
     permission_classes = [drf_permissions.IsAuthenticated]
     lookup_field = 'id'
@@ -1574,6 +1682,54 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
     @swagger_auto_schema(
+        method='get',
+        operation_summary="List returns for a sales item",
+        operation_description="Lists recorded returns for a sales item.",
+        responses={200: SalesReturnItemSerializer(many=True)},
+        tags=['Sales Returns']
+    )
+    @swagger_auto_schema(
+        method='post',
+        operation_summary="Create return for a sales item",
+        operation_description="Records a new per-item return.",
+        request_body=SalesReturnCreateSerializer,
+        responses={201: SalesReturnItemSerializer()},
+        tags=['Sales Returns']
+    )
+    @action(detail=True, methods=['get', 'post'], url_path='returns')
+    def returns(self, request, id=None):
+        sales_item = self.get_object()
+
+        if request.method.lower() == 'get':
+            serializer = SalesReturnItemSerializer(
+                sales_item.returns.select_related('returned_by', 'stock').prefetch_related('approvals', 'approvals__approved_by'),
+                many=True,
+                context={'request': request},
+            )
+            return Response(serializer.data)
+
+        serializer = SalesReturnCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            return_record = sales_item.create_return(
+                user=request.user,
+                quantity=serializer.validated_data['quantity'],
+                reason=serializer.validated_data['reason']
+            )
+            return Response(
+                SalesReturnItemSerializer(return_record, context={'request': request}).data,
+                status=status.HTTP_201_CREATED
+            )
+        except PermissionDenied as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            return Response({'error': e.messages}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(f"Return creation failed for sales item {sales_item.id}")
+            return Response({'error': 'An unexpected error occurred'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
         operation_summary="Get pending sales approvals",
         operation_description="Returns sales order items pending approval from the current user.",
         responses={200: SalesOrderItemSerializer(many=True)},
@@ -1627,3 +1783,193 @@ class SalesApprovalViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         return queryset
+
+
+class SalesReturnItemViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = SalesReturnItem.objects.select_related(
+        'sales_item', 'sales_item__sales_order', 'sales_item__product', 'returned_by', 'stock'
+    ).prefetch_related('approvals', 'approvals__approved_by').all()
+    serializer_class = SalesReturnItemSerializer
+    permission_classes = [drf_permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return self.queryset
+
+        queryset = self.queryset
+        user = getattr(self.request, 'user', None)
+        if not user or not user.is_authenticated:
+            return queryset.none()
+
+        sales_item_id = (self.request.query_params.get('sales_item_id') or '').strip()
+        if sales_item_id:
+            queryset = queryset.filter(sales_item_id=sales_item_id)
+
+        if not user.has_perm('document.can_view_all_sale_returns'):
+            queryset = queryset.filter(
+                Q(returned_by=user) |
+                Q(sales_item__sales_order__sold_by=user) |
+                Q(sales_item__sales_order__entered_by=user) |
+                Q(sales_item__sales_order__cart__user=user)
+            )
+
+        return queryset
+
+    def get_object(self):
+        try:
+            return super().get_object()
+        except Http404:
+            if getattr(self, 'swagger_fake_view', False):
+                raise
+
+            user = getattr(self.request, 'user', None)
+            if not user or not user.is_authenticated:
+                raise
+
+            if self.action not in ['approve', 'reject', 'approval_status']:
+                raise
+
+            lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+            lookup_value = self.kwargs.get(lookup_url_kwarg)
+            if lookup_value is None:
+                raise
+
+            obj = self.queryset.filter(**{self.lookup_field: lookup_value}).first()
+            if obj is None:
+                raise
+
+            if not (obj.can_approve(user) or obj.can_reject(user)):
+                raise
+
+            self.check_object_permissions(self.request, obj)
+            return obj
+
+    def _approval_progress(self, item: SalesReturnItem):
+        return item.approval_progress
+
+    def _current_step(self, item: SalesReturnItem):
+        return item.current_step_number
+
+    def _approval_chain_status(self, item: SalesReturnItem):
+        return item.get_approval_chain_status()
+
+    @swagger_auto_schema(
+        operation_summary="Approve current sales return step",
+        operation_description="Approves the current pending approval step for a sales return request.",
+        request_body=SalesReturnApproveSerializer,
+        responses={200: openapi.Response(description="Return approval successful")},
+        tags=['Sales Returns']
+    )
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, id=None):
+        sales_return = self.get_object()
+        serializer = SalesReturnApproveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            approval = sales_return.approve(
+                user=request.user,
+                reason=serializer.validated_data.get('reason')
+            )
+            sales_return.refresh_from_db()
+
+            return Response({
+                'message': f'Step {approval.sequence} approved successfully',
+                'sales_return_id': str(sales_return.id),
+                'status': sales_return.status,
+                'current_step': self._current_step(sales_return),
+                'approval_progress': self._approval_progress(sales_return),
+                'approvals': SalesReturnItemSerializer.SalesReturnApprovalSerializer(
+                    sales_return.approvals.all(),
+                    many=True,
+                    context={'request': request},
+                ).data,
+            }, status=status.HTTP_200_OK)
+
+        except PermissionDenied as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            return Response({'error': e.messages}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(f"Approval failed for sales return {sales_return.id}")
+            return Response({'error': 'An unexpected error occurred'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
+        operation_summary="Reject sales return",
+        operation_description="Rejects a sales return request at the current approval step.",
+        request_body=SalesReturnRejectSerializer,
+        responses={200: openapi.Response(description="Return rejection successful")},
+        tags=['Sales Returns']
+    )
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, id=None):
+        sales_return = self.get_object()
+        serializer = SalesReturnRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            sales_return.reject(
+                user=request.user,
+                reason=serializer.validated_data['reason']
+            )
+            sales_return.refresh_from_db()
+
+            return Response({
+                'message': f'Sales return {sales_return.id} has been rejected',
+                'sales_return_id': str(sales_return.id),
+                'status': sales_return.status,
+                'reason': serializer.validated_data['reason']
+            }, status=status.HTTP_200_OK)
+
+        except PermissionDenied as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            return Response({'error': e.messages}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(f"Rejection failed for sales return {sales_return.id}")
+            return Response({'error': 'An unexpected error occurred'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
+        operation_summary="Get sales return approval status",
+        operation_description="Returns approval chain status and current user's ability to approve or reject for a sales return request.",
+        responses={200: openapi.Response(description="Return approval status retrieved")},
+        tags=['Sales Returns']
+    )
+    @action(detail=True, methods=['get'], url_path='approval-status')
+    def approval_status(self, request, id=None):
+        sales_return = self.get_object()
+        sales_item = sales_return.sales_item
+        return Response({
+            'sales_return_id': str(sales_return.id),
+            'sales_item_id': str(sales_item.id),
+            'status': sales_return.status,
+            'progress_percentage': self._approval_progress(sales_return),
+            'current_step': self._current_step(sales_return),
+            'current_required_permission': sales_return.current_required_permission,
+            'quantity': sales_return.quantity,
+            'reason': sales_return.reason,
+            'created_at': sales_return.created_at,
+            'sold_at': sales_item.sales_order.sold_at or sales_item.created_at,
+            'approval_chain': self._approval_chain_status(sales_return),
+            'can_approve': sales_return.can_approve(request.user),
+            'can_reject': sales_return.can_reject(request.user),
+        })
+
+    @swagger_auto_schema(
+        operation_summary="Get pending sales return approvals",
+        operation_description="Returns sales return requests pending approval from the current user.",
+        responses={200: SalesReturnItemSerializer(many=True)},
+        tags=['Sales Returns']
+    )
+    @action(detail=False, methods=['get'], url_path='pending-approvals')
+    def pending_approvals(self, request):
+        user = request.user
+        queryset = self.queryset.filter(status='pending', approvals__status='pending').distinct()
+        can_approve_ids = []
+        for item in queryset:
+            if item.can_approve(user):
+                can_approve_ids.append(item.id)
+        items = self.queryset.filter(id__in=can_approve_ids)
+        serializer = SalesReturnItemSerializer(items, many=True, context={'request': request})
+        return Response(serializer.data)

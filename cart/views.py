@@ -36,7 +36,14 @@ class UserCartListView(mixins.ListModelMixin, generics.GenericAPIView):
         return (
             Cart.objects.filter(user=self.request.user)
             .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
-            .prefetch_related('items', 'sales_order__items__approvals')
+            .prefetch_related(
+                'items',
+                'sales_order__items__approvals',
+                'sales_order__items__returns',
+                'sales_order__items__returns__returned_by',
+                'sales_order__items__returns__approvals',
+                'sales_order__items__returns__approvals__approved_by',
+            )
             .order_by("-created_at")
         )
 
@@ -59,7 +66,14 @@ class CartDetailView(mixins.RetrieveModelMixin, generics.GenericAPIView):
         return (
             Cart.objects.filter(user=self.request.user)
             .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
-            .prefetch_related('items', 'sales_order__items__approvals')
+            .prefetch_related(
+                'items',
+                'sales_order__items__approvals',
+                'sales_order__items__returns',
+                'sales_order__items__returns__returned_by',
+                'sales_order__items__returns__approvals',
+                'sales_order__items__returns__approvals__approved_by',
+            )
         )
 
     @swagger_auto_schema(
@@ -81,7 +95,14 @@ class UpdateCartView(mixins.UpdateModelMixin, generics.GenericAPIView):
         return (
             Cart.objects.filter(user=self.request.user)
             .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
-            .prefetch_related('items', 'sales_order__items__approvals')
+            .prefetch_related(
+                'items',
+                'sales_order__items__approvals',
+                'sales_order__items__returns',
+                'sales_order__items__returns__returned_by',
+                'sales_order__items__returns__approvals',
+                'sales_order__items__returns__approvals__approved_by',
+            )
         )
 
     @swagger_auto_schema(
@@ -187,7 +208,14 @@ class CheckoutCartView(generics.GenericAPIView):
         return (
             Cart.objects.filter(user=self.request.user)
             .select_related('sales_order', 'sales_order__sold_by', 'sales_order__entered_by')
-            .prefetch_related('items', 'sales_order__items__approvals')
+            .prefetch_related(
+                'items',
+                'sales_order__items__approvals',
+                'sales_order__items__returns',
+                'sales_order__items__returns__returned_by',
+                'sales_order__items__returns__approvals',
+                'sales_order__items__returns__approvals__approved_by',
+            )
         )
 
     def post(self, request, *args, **kwargs):

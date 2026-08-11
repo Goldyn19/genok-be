@@ -604,6 +604,27 @@ class SalesOrder(models.Model):
             ("can_backdate_sale", "Can create backdated sales and assign salesperson"),
         ]
 
+    def recalculate_status(self):
+        items = list(self.items.prefetch_related('returns'))
+        if not items:
+            if self.status != 'pending':
+                self.status = 'pending'
+                self.save(update_fields=['status'])
+            return self.status
+
+        if any(item.status == 'rejected' for item in items):
+            next_status = 'rejected'
+        elif all(item.status == 'approved' for item in items):
+            next_status = 'returned' if all(item.remaining_returnable_quantity == 0 for item in items) else 'approved'
+        else:
+            next_status = 'pending'
+
+        if self.status != next_status:
+            self.status = next_status
+            self.save(update_fields=['status'])
+
+        return self.status
+
 
 class SalesOrderItem(models.Model):
     """
@@ -671,6 +692,30 @@ class SalesOrderItem(models.Model):
         perm = self.get_approval_permission_for_step(current.sequence)
         return user.has_perm(perm)
 
+    @property
+    def returned_quantity(self):
+        return self.returns.filter(status='approved').aggregate(total=models.Sum('quantity')).get('total') or 0
+
+    @property
+    def pending_return_quantity(self):
+        return self.returns.filter(status='pending').aggregate(total=models.Sum('quantity')).get('total') or 0
+
+    @property
+    def total_requested_return_quantity(self):
+        return self.returns.exclude(status='rejected').aggregate(total=models.Sum('quantity')).get('total') or 0
+
+    @property
+    def remaining_returnable_quantity(self):
+        return max(self.quantity - self.returned_quantity, 0)
+
+    @property
+    def remaining_requestable_return_quantity(self):
+        return max(self.quantity - self.total_requested_return_quantity, 0)
+
+    @property
+    def is_fully_returned(self):
+        return self.remaining_returnable_quantity == 0 and self.quantity > 0
+
     def approve(self, user, reason=None):
         if not self.can_approve(user):
             raise PermissionDenied("User cannot approve this sale item")
@@ -731,16 +776,291 @@ class SalesOrderItem(models.Model):
         self.product.save(update_fields=['balance'])
 
     def update_parent_order_status(self):
-        items = self.sales_order.items.all()
+        self.sales_order.recalculate_status()
 
-        if all(item.status == 'approved' for item in items):
-            self.sales_order.status = 'approved'
-        elif any(item.status == 'rejected' for item in items):
-            self.sales_order.status = 'rejected'
-        else:
-            self.sales_order.status = 'pending'
+    def create_return(self, user, quantity, reason):
+        if not user.has_perm('document.can_create_sale_return'):
+            raise PermissionDenied("User cannot create sale returns")
+        if self.status not in ('pending', 'approved'):
+            raise ValidationError("Only pending or approved sales items can have return requests")
+        if quantity <= 0:
+            raise ValidationError("Return quantity must be greater than 0")
+        if not self.product_id:
+            raise ValidationError("No stock linked to this sales item")
 
-        self.sales_order.save(update_fields=['status'])
+        with transaction.atomic():
+            locked_item = SalesOrderItem.objects.select_for_update().select_related(
+                'sales_order'
+            ).prefetch_related('returns').get(pk=self.pk)
+
+            if locked_item.status not in ('pending', 'approved'):
+                raise ValidationError("Only pending or approved sales items can have return requests")
+            if quantity > locked_item.remaining_requestable_return_quantity:
+                raise ValidationError(
+                    f"Cannot return more than the remaining requestable quantity ({locked_item.remaining_requestable_return_quantity})"
+                )
+
+            return_record = SalesReturnItem.objects.create(
+                sales_item=locked_item,
+                quantity=quantity,
+                reason=(reason or "").strip(),
+                returned_by=user,
+                status='pending',
+            )
+            SalesReturnApproval.objects.bulk_create([
+                SalesReturnApproval(sales_return=return_record, sequence=1),
+                SalesReturnApproval(sales_return=return_record, sequence=2),
+            ])
+            locked_item.sales_order.recalculate_status()
+            return return_record
+
+
+SalesReturnApproval_STATUS_CHOICES = (
+    ('pending', 'Pending'),
+    ('confirmed', 'Confirmed'),
+    ('failed', 'Failed')
+)
+
+
+class SalesReturnItem(models.Model):
+    STATUS_CHOICES = (
+        ('pending', 'Pending Approval'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sales_item = models.ForeignKey(SalesOrderItem, on_delete=models.CASCADE, related_name='returns')
+    stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_returns')
+    quantity = models.PositiveIntegerField()
+    reason = models.TextField()
+    returned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sale_returns'
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        permissions = [
+            ("can_create_sale_return", "Can create sale returns"),
+            ("can_approve_sale_return_step_one", "Can approve sale return step one"),
+            ("can_approve_sale_return_step_two", "Can approve sale return step two"),
+            ("can_reject_sale_return", "Can reject sale return"),
+            ("can_view_all_sale_returns", "Can view all sale returns"),
+        ]
+
+    def get_approval_permission_for_step(self, step):
+        return {
+            1: 'document.can_approve_sale_return_step_one',
+            2: 'document.can_approve_sale_return_step_two',
+        }.get(step)
+
+    def get_current_approval(self):
+        return self.approvals.filter(status='pending').order_by('sequence').first()
+
+    def is_previous_complete(self, approval):
+        if approval.sequence == 1:
+            return True
+        previous = self.approvals.filter(sequence=approval.sequence - 1).first()
+        return previous and previous.status == 'confirmed'
+
+    def can_approve(self, user):
+        if self.status != 'pending':
+            return False
+
+        current = self.get_current_approval()
+        if not current:
+            return False
+
+        if not self.is_previous_complete(current):
+            return False
+
+        perm = self.get_approval_permission_for_step(current.sequence)
+        return bool(perm) and user.has_perm(perm)
+
+    def can_reject(self, user):
+        if self.status != 'pending':
+            return False
+        current = self.get_current_approval()
+        if not current:
+            return False
+        if not self.is_previous_complete(current):
+            return False
+        return user.has_perm('document.can_reject_sale_return')
+
+    @property
+    def approval_progress(self):
+        total = self.approvals.count()
+        completed = self.approvals.filter(status='confirmed').count()
+        return int((completed / total) * 100) if total > 0 else 0
+
+    @property
+    def current_step_number(self):
+        current = self.get_current_approval()
+        return current.sequence if current else None
+
+    @property
+    def current_required_permission(self):
+        current = self.get_current_approval()
+        if current:
+            return self.get_approval_permission_for_step(current.sequence)
+        return None
+
+    def get_approval_chain_status(self):
+        chain = []
+        approvals = self.approvals.select_related('approved_by').order_by('sequence')
+        for approval in approvals:
+            is_blocked = False
+            if approval.sequence > 1:
+                previous = self.approvals.filter(sequence=approval.sequence - 1).first()
+                is_blocked = previous and previous.status != 'confirmed'
+
+            chain.append({
+                'step': approval.sequence,
+                'required_permission': self.get_approval_permission_for_step(approval.sequence),
+                'status': approval.status,
+                'is_blocked': is_blocked,
+                'can_approve': approval.status == 'pending' and not is_blocked,
+                'approved_by': {
+                    'id': approval.approved_by.id,
+                    'username': approval.approved_by.username,
+                    'full_name': approval.approved_by.get_full_name()
+                } if approval.approved_by else None,
+                'approved_at': approval.approved_at,
+                'reason': approval.reason,
+            })
+        return chain
+
+    def approve(self, user, reason=None):
+        if not self.can_approve(user):
+            raise PermissionDenied("User cannot approve this sale return")
+
+        with transaction.atomic():
+            locked_return = (
+                SalesReturnItem.objects.select_for_update()
+                .select_related('sales_item', 'sales_item__sales_order')
+                .get(pk=self.pk)
+            )
+            current = locked_return.approvals.select_for_update().filter(status='pending').order_by('sequence').first()
+            if not current:
+                raise ValidationError("No pending return approval step")
+            if not locked_return.is_previous_complete(current):
+                raise ValidationError(f"Step {current.sequence - 1} must be completed first")
+
+            current.status = 'confirmed'
+            current.reason = reason
+            current.approved_by = user
+            current.approved_at = timezone.now()
+            current.save()
+
+            if not locked_return.approvals.filter(status='pending').exists():
+                if not locked_return.sales_item.product_id:
+                    raise ValidationError("No stock linked to this sales item")
+                stock = Stock.objects.select_for_update().get(pk=locked_return.sales_item.product_id)
+                stock.balance += locked_return.quantity
+                stock.save(update_fields=['balance'])
+                locked_return.status = 'approved'
+                locked_return.stock = stock
+                locked_return.save(update_fields=['status', 'stock'])
+                locked_return.sales_item.sales_order.recalculate_status()
+
+            return current
+
+    def reject(self, user, reason=None):
+        if not self.can_reject(user):
+            raise PermissionDenied("User cannot reject this sale return")
+
+        with transaction.atomic():
+            locked_return = SalesReturnItem.objects.select_for_update().select_related(
+                'sales_item', 'sales_item__sales_order'
+            ).get(pk=self.pk)
+            current = locked_return.approvals.select_for_update().filter(status='pending').order_by('sequence').first()
+            if not current:
+                raise ValidationError("No pending return approval step")
+
+            current.status = 'failed'
+            current.reason = reason or "Rejected"
+            current.approved_by = user
+            current.approved_at = timezone.now()
+            current.save()
+
+            locked_return.status = 'rejected'
+            locked_return.save(update_fields=['status'])
+            locked_return.sales_item.sales_order.recalculate_status()
+
+    def __str__(self):
+        return f"Return {self.id} for sales item {self.sales_item_id} - {self.status}"
+
+    def clean(self):
+        if self.quantity <= 0:
+            raise ValidationError({'quantity': 'Return quantity must be greater than 0'})
+        if not self.reason or not self.reason.strip():
+            raise ValidationError({'reason': 'Return reason is required'})
+
+        sales_item = self.sales_item
+        if sales_item.status not in ('pending', 'approved'):
+            raise ValidationError({'sales_item': 'Only pending or approved sales items can have return requests'})
+
+        existing_qty = sales_item.returns.exclude(pk=self.pk).exclude(status='rejected').aggregate(total=models.Sum('quantity')).get('total') or 0
+        if existing_qty + self.quantity > sales_item.quantity:
+            raise ValidationError({'quantity': 'Requested return quantity exceeds quantity sold'})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class SalesReturnApproval(models.Model):
+    sales_return = models.ForeignKey(
+        SalesReturnItem,
+        on_delete=models.CASCADE,
+        related_name='approvals'
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sales_return_approvals'
+    )
+    sequence = models.IntegerField()
+    status = models.CharField(max_length=20, default='pending', choices=SalesReturnApproval_STATUS_CHOICES)
+    reason = models.TextField(blank=True, null=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['sequence']
+        unique_together = [['sales_return', 'sequence']]
+        indexes = [
+            models.Index(fields=['sales_return', 'sequence', 'status']),
+        ]
+
+    def get_required_permission(self):
+        return {
+            1: 'document.can_approve_sale_return_step_one',
+            2: 'document.can_approve_sale_return_step_two',
+        }.get(self.sequence)
+
+    def clean(self):
+        if self.sequence > 1:
+            previous = self.sales_return.approvals.filter(sequence=self.sequence - 1).first()
+            if previous and previous.status != 'confirmed' and self.status == 'confirmed':
+                raise ValidationError(
+                    f"Cannot approve step {self.sequence} before step {self.sequence - 1} is completed"
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        perm = self.get_required_permission()
+        return f"Return step {self.sequence}: {perm} - {self.status}"
 
 
 SalesApproval_STATUS_CHOICES = (

@@ -5,7 +5,7 @@ from django.contrib.auth.models import Permission
 from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
-from .models import PurchaseBook, PurchaseApproval, SalesOrder, SalesOrderItem, SalesApproval
+from .models import PurchaseBook, PurchaseApproval, SalesOrder, SalesOrderItem, SalesApproval, SalesReturnItem, SalesReturnApproval
 from product.serializers import LocationSerializer, StockSerializer
 from product.models import Location, Stock
 from payments.models import CreditID, CreditTransaction
@@ -495,17 +495,115 @@ class SalesRejectSerializer(serializers.Serializer):
             raise serializers.ValidationError("Rejection reason is required")
         return value
 
+
+class SalesReturnItemSerializer(serializers.ModelSerializer):
+    part_name = serializers.CharField(source='sales_item.product.part_name', read_only=True)
+    part_number = serializers.CharField(source='sales_item.product.part_number', read_only=True)
+    returned_by_details = UserBasicSerializer(source='returned_by', read_only=True)
+    approvals = serializers.SerializerMethodField()
+    approval_progress = serializers.IntegerField(read_only=True)
+    current_step_number = serializers.IntegerField(read_only=True)
+    current_required_permission = serializers.CharField(read_only=True)
+    can_current_user_approve = serializers.SerializerMethodField()
+    can_current_user_reject = serializers.SerializerMethodField()
+
+    class SalesReturnApprovalSerializer(serializers.ModelSerializer):
+        approved_by_details = UserBasicSerializer(source='approved_by', read_only=True)
+        required_permission = serializers.SerializerMethodField()
+
+        class Meta:
+            model = SalesReturnApproval
+            fields = [
+                'id',
+                'sequence',
+                'status',
+                'reason',
+                'approved_at',
+                'approved_by',
+                'approved_by_details',
+                'required_permission',
+            ]
+            read_only_fields = fields
+
+        def get_required_permission(self, obj):
+            return obj.get_required_permission()
+
+    class Meta:
+        model = SalesReturnItem
+        fields = [
+            'id',
+            'sales_item',
+            'part_name',
+            'part_number',
+            'stock',
+            'quantity',
+            'reason',
+            'returned_by',
+            'returned_by_details',
+            'status',
+            'approval_progress',
+            'current_step_number',
+            'current_required_permission',
+            'can_current_user_approve',
+            'can_current_user_reject',
+            'approvals',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_approvals(self, obj):
+        approvals = obj.approvals.all()
+        return self.SalesReturnApprovalSerializer(approvals, many=True, context=self.context).data
+
+    def get_can_current_user_approve(self, obj):
+        request = self.context.get('request')
+        return obj.can_approve(request.user) if request else False
+
+    def get_can_current_user_reject(self, obj):
+        request = self.context.get('request')
+        return obj.can_reject(request.user) if request else False
+
+
+class SalesReturnCreateSerializer(serializers.Serializer):
+    quantity = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(required=True, allow_blank=False, max_length=500)
+
+    def validate_reason(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Return reason is required")
+        return value.strip()
+
+
+class SalesReturnApproveSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=500)
+
+
+class SalesReturnRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True, allow_blank=False, max_length=500)
+
+    def validate_reason(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Rejection reason is required")
+        return value.strip()
+
 # ==================== SalesOrder Item ====================
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source='product.part_name', read_only=True)
     part_number = serializers.CharField(source='product.part_number', read_only=True)
     approvals = SalesApprovalSerializer(many=True, read_only=True)
+    returns = SalesReturnItemSerializer(many=True, read_only=True)
     sold_at = serializers.SerializerMethodField()
     sold_by = serializers.PrimaryKeyRelatedField(source='sales_order.sold_by', read_only=True)
     sold_by_details = UserBasicSerializer(source='sales_order.sold_by', read_only=True)
     entered_by = serializers.PrimaryKeyRelatedField(source='sales_order.entered_by', read_only=True)
     entered_by_details = UserBasicSerializer(source='sales_order.entered_by', read_only=True)
+    returned_quantity = serializers.IntegerField(read_only=True)
+    pending_return_quantity = serializers.IntegerField(read_only=True)
+    total_requested_return_quantity = serializers.IntegerField(read_only=True)
+    remaining_returnable_quantity = serializers.IntegerField(read_only=True)
+    remaining_requestable_return_quantity = serializers.IntegerField(read_only=True)
+    is_fully_returned = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = SalesOrderItem
@@ -523,6 +621,13 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             'sold_by_details',
             'entered_by',
             'entered_by_details',
+            'returned_quantity',
+            'pending_return_quantity',
+            'total_requested_return_quantity',
+            'remaining_returnable_quantity',
+            'remaining_requestable_return_quantity',
+            'is_fully_returned',
+            'returns',
             'approvals',
             'created_at',
         ]
