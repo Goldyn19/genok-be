@@ -591,6 +591,8 @@ class SalesReturnRejectSerializer(serializers.Serializer):
 class SalesOrderItemSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source='product.part_name', read_only=True)
     part_number = serializers.CharField(source='product.part_number', read_only=True)
+    brand = serializers.SerializerMethodField()
+    is_original = serializers.SerializerMethodField()
     approvals = SalesApprovalSerializer(many=True, read_only=True)
     returns = SalesReturnItemSerializer(many=True, read_only=True)
     sold_at = serializers.SerializerMethodField()
@@ -612,6 +614,8 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             'product',
             'part_name',
             'part_number',
+            'brand',
+            'is_original',
             'quantity',
             'unit_price',
             'total_price',
@@ -635,6 +639,18 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
 
     def get_sold_at(self, obj):
         return obj.sales_order.sold_at or obj.sales_order.created_at or obj.created_at
+
+    def get_brand(self, obj):
+        product = getattr(obj, 'product', None)
+        if not product:
+            return None
+        return getattr(product, 'brand', None)
+
+    def get_is_original(self, obj):
+        product = getattr(obj, 'product', None)
+        if not product:
+            return None
+        return getattr(product, 'is_original', None)
 
 
 # ==================== SalesOrder List ====================
