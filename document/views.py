@@ -1822,7 +1822,8 @@ class SalesReturnItemViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(sales_item__product__part_name__icontains=q) |
                 Q(reason__icontains=q) |
                 Q(returned_by__email__icontains=q) |
-                Q(returned_by__username__icontains=q)
+                Q(returned_by__first_name__icontains=q) |
+                Q(returned_by__last_name__icontains=q)
             )
 
         return queryset

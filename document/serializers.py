@@ -603,6 +603,7 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     part_number = serializers.CharField(source='product.part_number', read_only=True)
     brand = serializers.SerializerMethodField()
     is_original = serializers.SerializerMethodField()
+    sold_to = serializers.SerializerMethodField()
     approvals = SalesApprovalSerializer(many=True, read_only=True)
     returns = SalesReturnItemSerializer(many=True, read_only=True)
     sold_at = serializers.SerializerMethodField()
@@ -626,6 +627,7 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             'part_number',
             'brand',
             'is_original',
+            'sold_to',
             'quantity',
             'unit_price',
             'total_price',
@@ -661,6 +663,11 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
         if not product:
             return None
         return getattr(product, 'is_original', None)
+
+    def get_sold_to(self, obj):
+        sales_order = getattr(obj, 'sales_order', None)
+        cart = getattr(sales_order, 'cart', None) if sales_order else None
+        return getattr(cart, 'customer_name', None) if cart else None
 
 
 # ==================== SalesOrder List ====================
