@@ -3,6 +3,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.db.models import Q
+from django.utils import timezone
 from django.db import transaction
 from django.utils import timezone
 from .models import PurchaseBook, PurchaseApproval, SalesOrder, SalesOrderItem, SalesApproval, SalesReturnItem, SalesReturnApproval
@@ -538,6 +539,7 @@ class SalesReturnItemSerializer(serializers.ModelSerializer):
             'stock',
             'quantity',
             'reason',
+            'returned_at',
             'returned_by',
             'returned_by_details',
             'status',
@@ -567,11 +569,19 @@ class SalesReturnItemSerializer(serializers.ModelSerializer):
 class SalesReturnCreateSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1)
     reason = serializers.CharField(required=True, allow_blank=False, max_length=500)
+    returned_at = serializers.DateField(required=False, allow_null=True)
 
     def validate_reason(self, value):
         if not value.strip():
             raise serializers.ValidationError("Return reason is required")
         return value.strip()
+
+    def validate_returned_at(self, value):
+        if value is None:
+            return value
+        if value > timezone.localdate():
+            raise serializers.ValidationError("Returned date cannot be in the future")
+        return value
 
 
 class SalesReturnApproveSerializer(serializers.Serializer):

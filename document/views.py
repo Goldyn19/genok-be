@@ -1715,7 +1715,8 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
             return_record = sales_item.create_return(
                 user=request.user,
                 quantity=serializer.validated_data['quantity'],
-                reason=serializer.validated_data['reason']
+                reason=serializer.validated_data['reason'],
+                returned_at=serializer.validated_data.get('returned_at')
             )
             return Response(
                 SalesReturnItemSerializer(return_record, context={'request': request}).data,
@@ -1950,6 +1951,7 @@ class SalesReturnItemViewSet(viewsets.ReadOnlyModelViewSet):
             'quantity': sales_return.quantity,
             'reason': sales_return.reason,
             'created_at': sales_return.created_at,
+            'returned_at': sales_return.returned_at,
             'sold_at': sales_item.sales_order.sold_at or sales_item.created_at,
             'approval_chain': self._approval_chain_status(sales_return),
             'can_approve': sales_return.can_approve(request.user),

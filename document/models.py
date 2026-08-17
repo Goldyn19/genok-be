@@ -778,7 +778,7 @@ class SalesOrderItem(models.Model):
     def update_parent_order_status(self):
         self.sales_order.recalculate_status()
 
-    def create_return(self, user, quantity, reason):
+    def create_return(self, user, quantity, reason, returned_at=None):
         if not user.has_perm('document.can_create_sale_return'):
             raise PermissionDenied("User cannot create sale returns")
         if self.status not in ('pending', 'approved'):
@@ -805,6 +805,7 @@ class SalesOrderItem(models.Model):
                 quantity=quantity,
                 reason=(reason or "").strip(),
                 returned_by=user,
+                returned_at=returned_at or timezone.localdate(),
                 status='pending',
             )
             SalesReturnApproval.objects.bulk_create([
@@ -834,6 +835,7 @@ class SalesReturnItem(models.Model):
     stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_returns')
     quantity = models.PositiveIntegerField()
     reason = models.TextField()
+    returned_at = models.DateField(null=True, blank=True)
     returned_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1001,6 +1003,8 @@ class SalesReturnItem(models.Model):
             raise ValidationError({'quantity': 'Return quantity must be greater than 0'})
         if not self.reason or not self.reason.strip():
             raise ValidationError({'reason': 'Return reason is required'})
+        if self.returned_at and self.returned_at > timezone.localdate():
+            raise ValidationError({'returned_at': 'Returned date cannot be in the future'})
 
         sales_item = self.sales_item
         if sales_item.status not in ('pending', 'approved'):
