@@ -1739,12 +1739,12 @@ class SalesOrderItemViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get'], url_path='pending-approvals')
     def pending_approvals(self, request):
         user = request.user
-        queryset = self.queryset.filter(status='pending', approvals__status='pending').distinct()
+        queryset = self.get_queryset().filter(status='pending', approvals__status='pending').distinct()
         can_approve_ids = []
         for item in queryset:
             if item.can_approve(user):
                 can_approve_ids.append(item.id)
-        items = self.queryset.filter(id__in=can_approve_ids)
+        items = queryset.filter(id__in=can_approve_ids)
         serializer = SalesOrderItemSerializer(items, many=True)
         return Response(serializer.data)
 
@@ -1813,6 +1813,16 @@ class SalesReturnItemViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(sales_item__sales_order__sold_by=user) |
                 Q(sales_item__sales_order__entered_by=user) |
                 Q(sales_item__sales_order__cart__user=user)
+            )
+
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            queryset = queryset.filter(
+                Q(sales_item__product__part_number__icontains=q) |
+                Q(sales_item__product__part_name__icontains=q) |
+                Q(reason__icontains=q) |
+                Q(returned_by__email__icontains=q) |
+                Q(returned_by__username__icontains=q)
             )
 
         return queryset
@@ -1967,11 +1977,11 @@ class SalesReturnItemViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get'], url_path='pending-approvals')
     def pending_approvals(self, request):
         user = request.user
-        queryset = self.queryset.filter(status='pending', approvals__status='pending').distinct()
+        queryset = self.get_queryset().filter(status='pending', approvals__status='pending').distinct()
         can_approve_ids = []
         for item in queryset:
             if item.can_approve(user):
                 can_approve_ids.append(item.id)
-        items = self.queryset.filter(id__in=can_approve_ids)
+        items = queryset.filter(id__in=can_approve_ids)
         serializer = SalesReturnItemSerializer(items, many=True, context={'request': request})
         return Response(serializer.data)
