@@ -148,6 +148,7 @@ class PurchaseBookDetailSerializer(serializers.ModelSerializer):
     current_required_permission = serializers.ReadOnlyField()
     can_current_user_approve = serializers.SerializerMethodField()
     can_current_user_reject = serializers.SerializerMethodField()
+    brand = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseBook
@@ -160,6 +161,13 @@ class PurchaseBookDetailSerializer(serializers.ModelSerializer):
             'approval_progress', 'current_step_number', 'current_required_permission',
             'can_current_user_approve', 'can_current_user_reject'
         ]
+
+    def get_brand(self, obj):
+        brand = (getattr(obj, 'brand', None) or '').strip() or None
+        if brand is not None:
+            return brand
+        stock = getattr(obj, 'stock', None)
+        return (getattr(stock, 'brand', None) or '').strip() or None
 
     def get_approval_chain_status(self, obj):
         """Get approval chain status with safe data"""
@@ -230,9 +238,10 @@ class PurchaseBookCreateSerializer(serializers.ModelSerializer):
 
         if not data.get('is_new_product'):
             data['parent_stock'] = None
-            data['brand'] = None
-            data['is_caterpillar'] = data.get('stock').is_caterpillar if data.get('stock') else True
-            data['is_original'] = data.get('stock').is_original if data.get('stock') else True
+            stock = data.get('stock')
+            data['brand'] = (getattr(stock, 'brand', None) or '').strip() or None
+            data['is_caterpillar'] = stock.is_caterpillar if stock else True
+            data['is_original'] = stock.is_original if stock else True
 
         # Validate stock exists and is active
         if data.get('stock'):
@@ -298,7 +307,7 @@ class PurchaseBookUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'quantity': 'Quantity must be greater than 0'})
 
         if instance and not instance.is_new_product:
-            data['brand'] = None
+            data['brand'] = (getattr(instance.stock, 'brand', None) or '').strip() or None
             data['is_caterpillar'] = instance.stock.is_caterpillar if instance.stock else instance.is_caterpillar
             data['is_original'] = instance.stock.is_original if instance.stock else instance.is_original
         elif 'brand' in data:

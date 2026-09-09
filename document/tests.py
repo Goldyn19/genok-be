@@ -93,12 +93,13 @@ class PurchaseSuperuserFinalApprovalTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         purchase.refresh_from_db()
         final_step = purchase.approvals.get(sequence=3)
-        created_stock = Stock.objects.get(part_number="B-NEW-100", location=self.location)
+        created_stock = Stock.objects.get(part_number="B-NEW-100", top_level_location=self.location)
 
         self.assertEqual(final_step.status, "confirmed")
         self.assertEqual(final_step.approved_by_id, self.superuser.id)
         self.assertEqual(purchase.status, "confirmed")
         self.assertEqual(created_stock.balance, 5)
+        self.assertTrue(created_stock.locations.filter(id=self.location.id).exists())
 
     def test_superuser_can_bulk_approve_only_final_step_purchases(self):
         final_purchase = self._make_final_step_purchase(self.superuser)
