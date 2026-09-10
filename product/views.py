@@ -2,7 +2,7 @@ import csv
 import io
 from rest_framework import status, generics, mixins, permissions as drf_permissions
 from .models import Location, Stock
-from .serializers import LocationSerializer, StockSerializer
+from .serializers import LocationListSerializer, LocationSerializer, StockListSerializer, StockSerializer
 from rest_framework.response import Response
 from rest_framework.request import Request
 from rest_framework.pagination import PageNumberPagination
@@ -111,12 +111,12 @@ class LocationRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class LocationListView(generics.ListAPIView):
-    serializer_class = LocationSerializer
-    queryset = Location.objects.all().select_related('parent')
+    serializer_class = LocationListSerializer
+    queryset = Location.objects.all()
     permission_classes = [drf_permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().only('id', 'parent_id', 'location')
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(location__icontains=q)
@@ -125,7 +125,7 @@ class LocationListView(generics.ListAPIView):
     @swagger_auto_schema(
         operation_summary='List locations',
         operation_description='List locations. Supports optional `q` search over location name.',
-        responses={200: LocationSerializer(many=True)},
+        responses={200: LocationListSerializer(many=True)},
         tags=['Product'],
     )
     def get(self, request, *args, **kwargs):
@@ -415,7 +415,7 @@ class StockRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class StockListView(generics.ListAPIView):
-    serializer_class = StockSerializer
+    serializer_class = StockListSerializer
     permission_classes = [drf_permissions.IsAuthenticated]
     class Pagination(PageNumberPagination):
         page_size = 50
@@ -425,7 +425,22 @@ class StockListView(generics.ListAPIView):
     pagination_class = Pagination
 
     def get_queryset(self):
-        qs = Stock.objects.all().select_related('location')
+        qs = (
+            Stock.objects.all()
+            .only(
+                'id',
+                'part_number',
+                'part_name',
+                'price',
+                'is_caterpillar',
+                'brand',
+                'is_original',
+                'top_level_location_id',
+                'balance',
+                'parent_id',
+            )
+            .prefetch_related('locations')
+        )
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(Q(part_name__icontains=q) | Q(part_number__icontains=q))
@@ -445,7 +460,7 @@ class StockListView(generics.ListAPIView):
     @swagger_auto_schema(
         operation_summary='List stock',
         operation_description='List stock entries. Supports optional `q` search over part name/number. Supports pagination with `page` and `page_size`.',
-        responses={200: StockSerializer(many=True)},
+        responses={200: StockListSerializer(many=True)},
         tags=['Product'],
     )
     def get(self, request, *args, **kwargs):

@@ -3,6 +3,12 @@ from .models import Location, Stock
 from rest_framework.validators import ValidationError
 
 
+class LocationListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Location
+        fields = ['id', 'parent', 'location']
+
+
 class LocationSerializer(serializers.ModelSerializer):
     children = serializers.SerializerMethodField()
 
@@ -126,3 +132,25 @@ class StockSerializer(serializers.ModelSerializer):
         if locations_data is not None:
             instance.locations.set(locations_data)
         return result
+
+
+class StockListSerializer(serializers.ModelSerializer):
+    top_level_location = serializers.PrimaryKeyRelatedField(read_only=True)
+    locations = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    display_balance = serializers.ReadOnlyField(source="balance")
+
+    class Meta:
+        model = Stock
+        fields = [
+            'id',
+            'part_number',
+            'part_name',
+            'price',
+            'is_caterpillar',
+            'brand',
+            'is_original',
+            'top_level_location',
+            'locations',
+            'display_balance',
+            'parent'
+        ]
