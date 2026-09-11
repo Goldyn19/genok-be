@@ -8,7 +8,7 @@ from rest_framework.request import Request
 from rest_framework.pagination import PageNumberPagination
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-from django.db.models import Q
+from django.db.models import Q, Case, When, IntegerField
 from django.db import transaction
 from rest_framework.parsers import MultiPartParser, FormParser
 from roles.permissions import IsSuperuserOnly
@@ -424,8 +424,8 @@ class StockListView(generics.ListAPIView):
 
     pagination_class = Pagination
 
-    def get_queryset(self):
-        qs = (
+    def _base_queryset(self):
+        return (
             Stock.objects.all()
             .only(
                 'id',
@@ -441,14 +441,66 @@ class StockListView(generics.ListAPIView):
             )
             .prefetch_related('locations')
         )
+
+    def _expand_family_ids(self, root_id, max_depth=20, max_nodes=500):
+        family_ids = {root_id}
+        frontier = {root_id}
+
+        for _ in range(max_depth):
+            child_ids = set(
+                Stock.objects.filter(parent_id__in=frontier).values_list('id', flat=True)
+            )
+            new_ids = child_ids - family_ids
+            if not new_ids:
+                break
+            family_ids.update(new_ids)
+            if len(family_ids) >= max_nodes:
+                break
+            frontier = new_ids
+
+        return family_ids
+
+    def get_queryset(self):
+        qs = self._base_queryset()
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(Q(part_name__icontains=q) | Q(part_number__icontains=q))
         return qs.order_by('part_number')
 
     def list(self, request, *args, **kwargs):
+        include_family = str(request.query_params.get('include_family') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        q = (request.query_params.get('q') or '').strip()
+        if include_family and q:
+            hit = Stock.objects.only('id', 'parent_id').filter(part_number__iexact=q).first()
+            if hit:
+                root = hit
+                for _ in range(20):
+                    if not root.parent_id:
+                        break
+                    parent = Stock.objects.only('id', 'parent_id').filter(id=root.parent_id).first()
+                    if not parent:
+                        break
+                    root = parent
+
+                family_ids = self._expand_family_ids(root.id, max_depth=20, max_nodes=500)
+                queryset = (
+                    self._base_queryset()
+                    .filter(id__in=family_ids)
+                    .order_by(
+                        Case(
+                            When(part_number__iexact=q, then=0),
+                            default=1,
+                            output_field=IntegerField(),
+                        ),
+                        'part_number',
+                    )
+                )
+            else:
+                queryset = self.filter_queryset(self.get_queryset())
+        else:
+            queryset = self.filter_queryset(self.get_queryset())
+
         wants_pagination = "page" in request.query_params or "page_size" in request.query_params
-        queryset = self.filter_queryset(self.get_queryset())
         if wants_pagination:
             page = self.paginate_queryset(queryset)
             if page is not None:
@@ -459,7 +511,12 @@ class StockListView(generics.ListAPIView):
 
     @swagger_auto_schema(
         operation_summary='List stock',
-        operation_description='List stock entries. Supports optional `q` search over part name/number. Supports pagination with `page` and `page_size`.',
+        operation_description=(
+            'List stock entries. Supports optional `q` search over part name/number. '
+            'Supports pagination with `page` and `page_size`. '
+            'Set `include_family=1` to expand an exact part_number match into its full parent/child family (N depth), '
+            'bounded by server-side caps.'
+        ),
         responses={200: StockListSerializer(many=True)},
         tags=['Product'],
     )

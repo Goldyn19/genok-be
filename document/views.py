@@ -5,8 +5,8 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
-from django.db.models import Q, Sum, Count, F, Value, CharField, IntegerField, Case, When, ExpressionWrapper, OuterRef, Subquery
-from django.db.models.functions import Cast
+from django.db.models import Q, Sum, Count, F, Value, CharField, IntegerField, DateTimeField, Case, When, ExpressionWrapper, OuterRef, Subquery
+from django.db.models.functions import Cast, Coalesce
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404
@@ -63,6 +63,13 @@ class ActivityFeedView(generics.GenericAPIView):
                 Q(sales_order__cart__user=user)
             )
 
+        sale_returns = SalesReturnItem.objects.select_related(
+            'sales_item__product', 'sales_item__sales_order__cart__user', 'sales_item__sales_order__sold_by',
+            'sales_item__sales_order__entered_by', 'returned_by'
+        )
+        if not user.has_perm('document.can_view_all_sale_returns'):
+            sale_returns = sale_returns.filter(returned_by=user)
+
         search_term = (filters.get('q') or '').strip()
         if search_term:
             purchases = purchases.filter(
@@ -73,13 +80,20 @@ class ActivityFeedView(generics.GenericAPIView):
                 Q(product__part_name__icontains=search_term) |
                 Q(product__part_number__icontains=search_term)
             )
+            sale_returns = sale_returns.filter(
+                Q(sales_item__product__part_name__icontains=search_term) |
+                Q(sales_item__product__part_number__icontains=search_term) |
+                Q(reason__icontains=search_term)
+            )
 
         if filters.get('from_date'):
             purchases = purchases.filter(created_at__date__gte=filters['from_date'])
             sales = sales.filter(sales_order__sold_at__date__gte=filters['from_date'])
+            sale_returns = sale_returns.filter(returned_at__gte=filters['from_date'])
         if filters.get('to_date'):
             purchases = purchases.filter(created_at__date__lte=filters['to_date'])
             sales = sales.filter(sales_order__sold_at__date__lte=filters['to_date'])
+            sale_returns = sale_returns.filter(returned_at__lte=filters['to_date'])
 
         purchase_rows = purchases.annotate(
             kind=Value('purchase', output_field=CharField()),
@@ -115,7 +129,29 @@ class ActivityFeedView(generics.GenericAPIView):
             'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
         )
 
-        combined = purchase_rows.union(sales_rows, all=True).order_by('-created_at')
+        return_rows = sale_returns.annotate(
+            kind=Value('sale_return', output_field=CharField()),
+            activity_id=Cast('id', output_field=CharField()),
+            activity_created_at=Coalesce(Cast('returned_at', output_field=DateTimeField()), F('created_at')),
+            part_name=F('sales_item__product__part_name'),
+            part_number_text=F('sales_item__product__part_number'),
+            quantity_value=F('quantity'),
+            status_text=F('status'),
+            location_name=Value('—', output_field=CharField()),
+            total=ExpressionWrapper(
+                Value(-1, output_field=IntegerField()) * F('sales_item__unit_price') * F('quantity'),
+                output_field=IntegerField(),
+            ),
+            created_by_name=F('returned_by__email'),
+        ).values_list(
+            'kind', 'activity_id', 'activity_created_at', 'part_name', 'part_number_text',
+            'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
+        )
+
+        purchase_rows = purchase_rows.order_by()
+        sales_rows = sales_rows.order_by()
+        return_rows = return_rows.order_by()
+        combined = purchase_rows.union(sales_rows, return_rows, all=True).order_by('-created_at')
         page = self.paginate_queryset(combined)
         rows = list(page if page is not None else combined)
         payload = [
