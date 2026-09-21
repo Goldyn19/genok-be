@@ -471,7 +471,7 @@ class StockListView(generics.ListAPIView):
         include_family = str(request.query_params.get('include_family') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
         q = (request.query_params.get('q') or '').strip()
         if include_family and q:
-            hit = Stock.objects.only('id', 'parent_id').filter(part_number__iexact=q).first()
+            hit = Stock.objects.only('id', 'parent_id', 'part_number').filter(part_number__iexact=q).first()
             if hit:
                 root = hit
                 for _ in range(20):
@@ -483,9 +483,16 @@ class StockListView(generics.ListAPIView):
                     root = parent
 
                 family_ids = self._expand_family_ids(root.id, max_depth=20, max_nodes=500)
+
+                same_part_number_ids = list(
+                    Stock.objects.filter(part_number__iexact=hit.part_number)
+                    .values_list('id', flat=True)
+                )
+
+                all_ids = family_ids | set(same_part_number_ids)
                 queryset = (
                     self._base_queryset()
-                    .filter(id__in=family_ids)
+                    .filter(id__in=all_ids)
                     .order_by(
                         Case(
                             When(part_number__iexact=q, then=0),
