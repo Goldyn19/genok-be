@@ -168,7 +168,7 @@ class PurchaseBook(models.Model):
             raise ValidationError("Location can only be changed while purchase is pending")
         if location_override == self.location:
             return
-        if not self.is_new_product or self.stock_id:
+        if not self.is_new_product:
             raise ValidationError("Location override is only allowed for new product purchases")
 
         normalized_brand = (self.brand or '').strip() or None
@@ -179,10 +179,7 @@ class PurchaseBook(models.Model):
         while purchase_root.parent_id:
             purchase_root = purchase_root.parent
 
-        if override_root.id == purchase_root.id:
-            return
-
-        if not self.is_new_product or self.stock_id:
+        if override_root.id != purchase_root.id:
             raise ValidationError("Location override is only allowed for new product purchases")
 
     def approve(self, user, reason=None, location_override=None):
