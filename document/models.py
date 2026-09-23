@@ -299,16 +299,16 @@ class PurchaseBook(models.Model):
 
         # === SAFETY CHECK 2: Prevent duplicate stock updates ===
         # For existing products, check if stock already has this quantity added
-        if not self.is_new_product and self.stock:
-            # Check if this purchase has already been applied to stock
-            # This assumes you have a way to track this - could use a signal or
-            # check if the stock balance is suspiciously high
-            if hasattr(self, '_stock_updated') or self._is_stock_already_updated():
-                logger.warning(
-                    f"Purchase #{self.id} - Stock already updated for this purchase. "
-                    f"Skipping duplicate update."
-                )
-                return False
+        # if not self.is_new_product and self.stock:
+        #     # Check if this purchase has already been applied to stock
+        #     # This assumes you have a way to track this - could use a signal or
+        #     # check if the stock balance is suspiciously high
+        #     if hasattr(self, '_stock_updated') or self._is_stock_already_updated():
+        #         logger.warning(
+        #             f"Purchase #{self.id} - Stock already updated for this purchase. "
+        #             f"Skipping duplicate update."
+        #         )
+        #         return False
 
         # === SAFETY CHECK 3: Verify final approval is confirmed ===
         total_approvals = self.approvals.count()
