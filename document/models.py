@@ -180,7 +180,8 @@ class PurchaseBook(models.Model):
             purchase_root = purchase_root.parent
 
         if override_root.id != purchase_root.id:
-            raise ValidationError("Location override is only allowed for new product purchases")
+            pass
+            # raise ValidationError("Location override is only allowed for new product purchases")
 
     def approve(self, user, reason=None, location_override=None):
         """
