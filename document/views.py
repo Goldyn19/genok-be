@@ -122,11 +122,11 @@ class ActivityFeedView(generics.GenericAPIView):
             quantity_value=F('quantity'),
             status_text=F('status'),
             location_name=Value('—', output_field=CharField()),
-            total=F('total_price'),
+            sold_to=F('sales_order__cart__customer_name'),
             created_by_name=F('sales_order__sold_by__email'),
         ).values_list(
             'kind', 'activity_id', 'sales_order__sold_at', 'part_name', 'part_number_text',
-            'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
+            'quantity_value', 'status_text', 'location_name', 'sold_to', 'created_by_name'
         )
 
         return_rows = sale_returns.annotate(
@@ -138,14 +138,11 @@ class ActivityFeedView(generics.GenericAPIView):
             quantity_value=F('quantity'),
             status_text=F('status'),
             location_name=Value('—', output_field=CharField()),
-            total=ExpressionWrapper(
-                Value(-1, output_field=IntegerField()) * F('sales_item__unit_price') * F('quantity'),
-                output_field=IntegerField(),
-            ),
+            sold_to=F('sales_item__sales_order__cart__customer_name'),
             created_by_name=F('returned_by__email'),
         ).values_list(
             'kind', 'activity_id', 'activity_created_at', 'part_name', 'part_number_text',
-            'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
+            'quantity_value', 'status_text', 'location_name', 'sold_to', 'created_by_name'
         )
 
         purchase_rows = purchase_rows.order_by()
@@ -164,7 +161,7 @@ class ActivityFeedView(generics.GenericAPIView):
                 'quantity': row[5],
                 'status': row[6],
                 'location': row[7],
-                'total': row[8],
+                'sold_to': row[8],
                 'created_by_name': row[9],
             }
             for row in rows

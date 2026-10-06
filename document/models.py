@@ -733,16 +733,14 @@ class SalesOrderItem(models.Model):
         current.approved_at = timezone.now()
         current.save()
 
-        # check if all approvals done
         if not self.approvals.filter(status='pending').exists():
-            self.status = 'approved'
-            self.save(update_fields=['status'])
+            with transaction.atomic():
+                self.update_stock()
 
-            # update stock immediately per item
-            self.update_stock()
+                self.status = 'approved'
+                self.save(update_fields=['status'])
 
-            # update parent order
-            self.update_parent_order_status()
+                self.update_parent_order_status()
 
         return current
 
