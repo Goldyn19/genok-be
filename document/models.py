@@ -727,14 +727,14 @@ class SalesOrderItem(models.Model):
                 f"Step {current.sequence - 1} must be completed first"
             )
 
-        current.status = 'confirmed'
-        current.reason = reason
-        current.approved_by = user
-        current.approved_at = timezone.now()
-        current.save()
+        with transaction.atomic():
+            current.status = 'confirmed'
+            current.reason = reason
+            current.approved_by = user
+            current.approved_at = timezone.now()
+            current.save()
 
-        if not self.approvals.filter(status='pending').exists():
-            with transaction.atomic():
+            if not self.approvals.filter(status='pending').exists():
                 self.update_stock()
 
                 self.status = 'approved'
