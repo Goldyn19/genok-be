@@ -103,15 +103,11 @@ class ActivityFeedView(generics.GenericAPIView):
             quantity_value=F('quantity'),
             status_text=F('status'),
             location_name=F('location__location'),
-            total=Case(
-                When(price__isnull=True, then=Value(None, output_field=IntegerField())),
-                default=ExpressionWrapper(F('price') * F('quantity'), output_field=IntegerField()),
-                output_field=IntegerField(),
-            ),
+            sold_to=Value(None, output_field=CharField()),
             created_by_name=F('created_by__email'),
         ).values_list(
             'kind', 'activity_id', 'created_at', 'part_name', 'part_number_text',
-            'quantity_value', 'status_text', 'location_name', 'total', 'created_by_name'
+            'quantity_value', 'status_text', 'location_name', 'sold_to', 'created_by_name'
         )
 
         sales_rows = sales.annotate(
